@@ -1,0 +1,73 @@
+# Build one optimization kit's container image (<kit>/environment/Dockerfile) and push it to this
+# repository's GitHub Container Registry, so clusters without Docker can `apptainer build` from it.
+#
+# The build context must be the repository ROOT: every kit's Dockerfile copies common/opt_core
+# alongside the kit's own tree.
+#
+# Run it: Actions -> "kit image" -> Run workflow -> pick the kit.
+# Then, on a cluster with Apptainer:
+#   apptainer build <kit>.sif docker://ghcr.io/<owner>/<kit>-kit:<tag>
+# A new ghcr package is PRIVATE by default and an anonymous `apptainer build` will fail with
+# "unauthorized": make it public once, under the package's settings on GitHub.
+name: kit image
+on:
+  workflow_dispatch:
+    inputs:
+      kit:
+        description: which kit to build
+        required: true
+        default: af3_jax
+        type: choice
+        options: [af3_jax, openfold3_ob0]
+      tag:
+        description: "image tag (default: the short commit)"
+        required: false
+        default: ""
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      # The images are large (CUDA base + the framework + a compiled wheel); a default runner
+      # runs out of disk partway through the build without this.
+      - name: reclaim runner disk
+        uses: easimon/maximize-build-space@v10
+        with:
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+          remove-codeql: true
+          remove-docker-images: true
+          root-reserve-mb: 6144
+          temp-reserve-mb: 1024
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: resolve the image name
+        id: img
+        run: |
+          t="${{ inputs.tag }}"; [ -n "$t" ] || t="${GITHUB_SHA::7}"
+          echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${{ inputs.kit }}-kit:$t" >> "$GITHUB_OUTPUT"
+      - name: build
+        run: |
+          docker build -f "${{ inputs.kit }}/environment/Dockerfile" \
+            --build-arg BUILD_JOBS=$(nproc) \
+            -t "${{ steps.img.outputs.name }}" .
+      - name: push
+        run: docker push "${{ steps.img.outputs.name }}"
+      - name: summary
+        run: |
+          {
+            echo "### ${{ steps.img.outputs.name }}"
+            echo
+            echo '```'
+            echo "apptainer build ${{ inputs.kit }}.sif docker://${{ steps.img.outputs.name }}"
+            echo '```'
+            echo "If the pull says \`unauthorized\`, make the package public in its GitHub settings."
+          } >> "$GITHUB_STEP_SUMMARY"
