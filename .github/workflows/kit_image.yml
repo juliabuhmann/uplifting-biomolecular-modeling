@@ -31,9 +31,9 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      # The images are large (CUDA base + the framework + a compiled wheel); a default runner
-      # runs out of disk partway through the build without this.
+      # FIRST, before checkout: this action mounts a new volume over the workspace directory,
+      # so anything already there (a checkout) is lost. The images are large (CUDA base + the
+      # framework + a compiled wheel) and a default runner fills up partway through the build.
       - name: reclaim runner disk
         uses: easimon/maximize-build-space@v10
         with:
@@ -44,6 +44,12 @@ jobs:
           remove-docker-images: true
           root-reserve-mb: 6144
           temp-reserve-mb: 1024
+      - uses: actions/checkout@v4
+      - name: check out the build context
+        run: |
+          echo "workspace: $PWD"; ls -1 | head -20
+          test -f "${{ inputs.kit }}/environment/Dockerfile" || { echo "::error::no ${{ inputs.kit }}/environment/Dockerfile in the build context"; exit 1; }
+          test -d common/opt_core || { echo "::error::common/opt_core missing -- the context must be the repository root"; exit 1; }
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
