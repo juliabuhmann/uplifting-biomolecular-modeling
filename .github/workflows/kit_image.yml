@@ -42,6 +42,7 @@ jobs:
         uses: easimon/maximize-build-space@v10
         with:
           build-mount-path: /var/lib/docker
+          build-mount-path-ownership: root      # the daemon's directory; the action's default hands it to the runner user
           remove-dotnet: true
           remove-android: true
           remove-haskell: true
