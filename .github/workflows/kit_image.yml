@@ -61,6 +61,11 @@ jobs:
           echo "workspace: $PWD"; ls -1 | head -20
           test -f "${{ inputs.kit }}/environment/Dockerfile" || { echo "::error::no ${{ inputs.kit }}/environment/Dockerfile in the build context"; exit 1; }
           test -d common/opt_core || { echo "::error::common/opt_core missing -- the context must be the repository root"; exit 1; }
+          # The kits' Dockerfiles COPY an OPTIONAL pre-filled compile cache with a glob
+          # (`_jitcache/<kit>-*-jit.ta[r]`). The glob may match nothing, but BuildKit still
+          # lstat()s the directory, and a clean clone has none: "lstat /_jitcache: no such file".
+          # An empty directory is exactly "no cache", which the Dockerfile documents as fine.
+          mkdir -p _jitcache
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
