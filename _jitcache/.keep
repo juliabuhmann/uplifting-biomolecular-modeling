@@ -1,6 +1,0 @@
-This directory exists so that a clean clone builds. Every kit's Dockerfile copies an OPTIONAL
-pre-filled compile cache from here with a glob (`_jitcache/<kit>-*-jit.ta[r]`). The glob may match
-nothing, but BuildKit resolves its parent directory first and fails with
-"lstat /_jitcache: no such file or directory" when the directory is absent -- and an empty
-directory is not carried into the build context, so a file has to hold it open. This file does
-not match the glob and is never copied into an image.

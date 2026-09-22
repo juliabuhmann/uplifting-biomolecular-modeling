@@ -63,8 +63,11 @@ COPY openfold3_ob0 /kit/openfold3_ob0
 WORKDIR /kit/openfold3_ob0
 RUN bash run.sh install
 
-# [install]-jitcache: optional pre-filled compile caches (build is identical when no tar is present)
-COPY openfold3_ob0/environment/Dockerfile _jitcache/openfold3_ob0-*-jit.ta[r] /tmp/jit/
-RUN set -e; mkdir -p /opt/jit_cache; \
-    for t in /tmp/jit/*-jit.tar; do [ -f "$t" ] && tar -xf "$t" -C /opt/jit_cache; done; \
-    chmod -R a+rX,u+w /opt/jit_cache; rm -rf /tmp/jit
+# [install]-jitcache: the release copied an OPTIONAL pre-filled compile cache here
+# (`COPY openfold3_ob0/environment/Dockerfile _jitcache/openfold3_ob0-*-jit.ta[r] /tmp/jit/`). In GitHub Actions
+# that COPY fails with "lstat /_jitcache: no such file or directory" even when the directory and
+# a file in it are committed and present in the checkout (juliabuhmann fork, runs 4 and 5,
+# 2026-09-22). This fork ships no such cache, and the release's own note says the build is
+# identical without one, so the copy is dropped and the cache root is simply created empty.
+# The kits fill it at first use (run.sh: MODEL_OPT_JIT_ROOT / AF3_JAX_CACHE_ROOT).
+RUN mkdir -p /opt/jit_cache && chmod -R a+rX,u+w /opt/jit_cache
