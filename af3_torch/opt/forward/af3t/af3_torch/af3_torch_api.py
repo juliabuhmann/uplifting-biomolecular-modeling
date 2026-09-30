@@ -185,8 +185,12 @@ def build_model(params_dir, levers="eager", num_recycles=10, num_samples=1, diff
     prologue (the sample-batched step's augmentation + noise arithmetic over the sample axis, draws unchanged: diffusion_head.augment_and_noise_batched).
     compile=True (or a torch.compile mode string) is the opt-in flag equivalent to adding the 'compile' lever (levers='fastest')."""
     levers = tuple(LEVER_SETS[levers]) if isinstance(levers, str) else tuple(levers)
+    params = xparams.load_params(params_dir)                                             # the records first: the OF3 variant (preview-2 | openbind) is read off them
+    of3.set_variant(xparams.detect_variant(params))                                      # and sets of3.OPENBIND BEFORE the modules are built (xfold/of3.py)
     model = AlphaFold3(num_recycles=num_recycles, num_samples=num_samples, diffusion_steps=diffusion_steps)
-    info = xparams.import_jax_weights_(model, params_dir)
+    xparams.check_layout_flags(params)
+    info = xparams.import_params_dict_(model, params)
+    info["variant"] = "openbind" if of3.OPENBIND else "p2"
     model = model.to(device).eval()
     model._af3t_load_info = info
     if "bf16w" in levers:

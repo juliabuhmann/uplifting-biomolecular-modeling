@@ -156,6 +156,10 @@ def install(model, P: int, rank: int, align: Optional[int] = None, seams: str = 
     if not getattr(OF3, "OF3", False):
         raise C["Refused"]("rowpair_xfold: xfold.of3.OF3 is False: the row-sharded statements follow the OpenFold3 weight layout (ending-node bias "
                            "from the transposed pair, symmetric bond contacts); the AlphaFold3-layout variant is not wired")
+    if getattr(OF3, "OPENBIND", False):
+        raise C["Refused"]("rowpair_xfold: the OpenFold3 openbind variant (xfold.of3.OPENBIND) is not wired under n_gpu>1: its ending-node bias is "
+                           "Linear(z[q, k]) as AlphaFold 3's, not the transposed form the core's starting-node row schedule serves on rows of z^T "
+                           "(preview-2); run it on one GPU")
     if getattr(model, "training", False):
         raise C["Refused"]("rowpair_xfold: n_gpu>1 requires model.eval() (a module in training mode draws per-rank dropout masks)")
     a = int(align) if align else ALIGN
@@ -1081,14 +1085,16 @@ def _rel_feat_rows(tf, g0: int, g1: int, dtype):
 
 
 def dit_block_fns(tr, i: int, mask):
-    """DiTBlockFns of block ``i`` of an xfold ``DiffusionTransformer`` (OpenFold3 layout: per-block pair LayerNorm + logits projection):
-    ``norm`` = the block's AdaLN of all tokens; ``kv`` = k / v heads of all tokens; ``attn`` = q of the query rows, logits + local bias rows + key
-    mask, softmax, PV, query gate; ``update`` = ``a[r0:r1] + adaptive_zero_init(o_rows, s[r0:r1])`` then ``+= transition_block(., s[r0:r1])``
-    (the conditioned transition on my rows); ``bias`` = ``pair_logits_projection[i](pair_input_layer_norm[i](z_rows))`` -> ``[rows, N, H]``."""
+    """DiTBlockFns of block ``i`` of an xfold ``DiffusionTransformer``: ``norm`` = the block's AdaLN of all tokens; ``kv`` = k / v heads of all
+    tokens; ``attn`` = q of the query rows, logits + local bias rows + key mask, softmax, PV, query gate; ``update`` = ``a[r0:r1] +
+    adaptive_zero_init(o_rows, s[r0:r1])`` then ``+= transition_block(., s[r0:r1])`` (the conditioned transition on my rows); ``bias`` = the
+    block's pair logits of my rows -> ``[rows, N, H]``: ``pair_logits_projection[i](pair_input_layer_norm[i](z_rows))`` under the OpenFold3
+    preview-2 layout (a LayerNorm + Linear per block), else heads ``j*H:(j+1)*H`` of super block ``sb``'s Linear on the shared LayerNorm
+    (``sb, j = divmod(i, super_block_size)``; the openbind / AlphaFold 3 layout — DiffusionTransformer.pair_logits_for_block's own arithmetic)."""
     C = STATE["C"] if "C" in STATE else _core()
     sa, tb = tr.self_attention[i], tr.transition_block[i]
     if not tr.of3:
-        raise XfoldTPRefused("dit_block_fns: the AlphaFold3 super-block pair-logit layout is not wired (xfold.of3.OF3 False)")
+        raise XfoldTPRefused("dit_block_fns: the AlphaFold3 weights are not wired (xfold.of3.OF3 False)")
 
     def norm(a, s):
         return sa.adaptive_layernorm(a, s)                              # AdaLN per token, all rows (k / v need every row)
@@ -1106,8 +1112,13 @@ def dit_block_fns(tr, i: int, mask):
         a_rows += tb(a_rows, s_rows)                                    # `act += transition_block(act, single_cond)` on my rows
         return a_rows
 
-    def bias(z_rows):
-        return tr.pair_logits_projection[i](tr.pair_input_layer_norm[i](z_rows))          # [rows, N, H]
+    if getattr(tr, "per_block_pair_bias", True):
+        def bias(z_rows):
+            return tr.pair_logits_projection[i](tr.pair_input_layer_norm[i](z_rows))      # [rows, N, H]  (preview-2: per-block LayerNorm + Linear)
+    else:
+        sb, j = divmod(i, int(tr.super_block_size)); H = int(tr.num_head)
+        def bias(z_rows):
+            return tr.pair_logits_projection[sb](tr.pair_input_layer_norm(z_rows))[..., j * H:(j + 1) * H]   # [rows, N, H]  (openbind / AF3: super block sb's Linear, this block's heads)
 
     return C["DF"].DiTBlockFns(norm, kv, attn, update, bias)
 

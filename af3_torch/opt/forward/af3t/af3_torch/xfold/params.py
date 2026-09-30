@@ -498,8 +498,8 @@ def DiffusionTransformerParams(transformer):
     transistion_params = stacked([DiffusionTransitionParams(
         l, use_single_cond=True) for l in transformer.transition_block])
 
-    if of3.OF3:
-        # OF3 layout: hk layer_stack(6)(layer_stack(4)(block)) without per-layer inputs; file shapes [6, 4, ...]
+    if of3.per_block_pair_bias():
+        # OF3 preview-2 layout: hk layer_stack(6)(layer_stack(4)(block)) without per-layer inputs; file shapes [6, 4, ...]
         # (assign() flattens the two stack axes); per-block pair LayerNorm (scale only) + Linear(c_pair, num_head).
         pfx = "__layer_stack_no_per_layer/__layer_stack_no_per_layer/"
         return {
@@ -731,21 +731,54 @@ def detect_layout(params: dict) -> str:
     return "of3" if "diffuser/~/diffusion_head/fourier_embedding_weight" in params else "af3"
 
 
-def import_jax_weights_(model, model_path: pathlib.Path):
-    """Load AF3-layout haiku records into the torch model.  `model_path` may be a params DIRECTORY (any *.bin.zst / *.bin
-    inside, e.g. DeepMind af3.bin.zst or the sokrypton OF3 port of3_ported_weights.bin.zst) or a single file.
-    The layout flag xfold.of3.OF3 must have been set BEFORE the model was constructed and must match the file."""
+_SHARED_PAIR_NORM = "diffuser/~/diffusion_head/transformer/pair_input_layer_norm/scale"                                       # AF3 / openbind: once on the transformer
+_PER_BLOCK_PAIR_NORM = "diffuser/~/diffusion_head/transformer/__layer_stack_no_per_layer/__layer_stack_no_per_layer/pair_input_layer_norm/scale"   # preview-2: [6, 4, c]
+
+
+def detect_variant(params: dict) -> str:
+    """Which OpenFold3 checkpoint an OF3-layout record set came from: "openbind" (OpenFold3 >= 0.5.0: the diffusion transformer's pair
+    LayerNorm once on the transformer, AF3's own scope) or "p2" (preview-2: one per block inside the layer stack). The two records are
+    mutually exclusive, so no version string is needed (the JAX fork's is_openbind_checkpoint, on the converted records)."""
+    shared, per_block = _SHARED_PAIR_NORM in params, _PER_BLOCK_PAIR_NORM in params
+    if shared == per_block:
+        raise ValueError(f"cannot tell the OF3 variant: shared pair LayerNorm record {'present' if shared else 'absent'}, per-block record {'present' if per_block else 'absent'}")
+    return "openbind" if shared else "p2"
+
+
+def load_params(model_path: pathlib.Path) -> dict:
+    """The haiku records of `model_path`: a params DIRECTORY (its first *.bin.zst / *.bin in name order, e.g. DeepMind af3.bin.zst or the
+    sokrypton OF3 port of3_ported_weights.bin.zst) or a single file."""
     model_path = pathlib.Path(model_path)
     if model_path.is_dir():
         cands = sorted(model_path.glob("*.bin.zst")) + sorted(model_path.glob("*.bin"))
         if not cands:
             raise FileNotFoundError(f"no *.bin.zst / *.bin under {model_path}")
-        params = get_alphafold3_params(cands[0])
-    else:
-        params = get_alphafold3_params(model_path)
+        return get_alphafold3_params(cands[0])
+    return get_alphafold3_params(model_path)
+
+
+def check_layout_flags(params: dict) -> str:
+    """Raise unless the layout flags (xfold.of3.OF3 / OPENBIND, read at model construction) match the records; returns the variant word
+    ("openbind" | "p2") for OF3 records, "af3" otherwise."""
     layout = detect_layout(params)
     if (layout == "of3") != bool(of3.OF3):
         raise ValueError(f"params layout is {layout!r} but xfold.of3.OF3={of3.OF3}; set the flag before building the model")
+    if layout != "of3":
+        return layout
+    variant = detect_variant(params)
+    if (variant == "openbind") != bool(of3.OPENBIND):
+        raise ValueError(f"params are the OpenFold3 {variant!r} variant but xfold.of3.OPENBIND={of3.OPENBIND}; the two variants keep the diffusion "
+                         f"transformer's pair bias in different scopes — set of3.OPENBIND (of3.set_variant) before building the model")
+    return variant
+
+
+def import_jax_weights_(model, model_path: pathlib.Path):
+    """Load AF3-layout haiku records into the torch model.  `model_path` may be a params DIRECTORY (any *.bin.zst / *.bin
+    inside, e.g. DeepMind af3.bin.zst or the sokrypton OF3 port of3_ported_weights.bin.zst) or a single file.
+    The layout flags xfold.of3.OF3 / OPENBIND must have been set BEFORE the model was constructed and must match the file
+    (af3_torch_api.build_model reads the records first and sets OPENBIND from them)."""
+    params = load_params(model_path)
+    check_layout_flags(params)
     return import_params_dict_(model, params)
 
 

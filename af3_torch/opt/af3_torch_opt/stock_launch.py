@@ -12,15 +12,29 @@ import runpy
 import sys
 
 ADAPTATIONS = (
-    "of3.OF3=True",            # xfold.of3.OF3: the OpenFold3 parameter layout (pristine xfold refuses the checkpoint: xfold/params.py:747-748)
+    "of3.OF3=True",            # xfold.of3.OF3: the OpenFold3 parameter layout (pristine xfold refuses the checkpoint: xfold/params.py check_layout_flags); of3.OPENBIND from the
+                               #   checkpoint's own records (--model_dir: xfold.params.detect_variant, the one read the CLI's loader repeats) — preview-2 or openbind
     "loaders-as-lists",        # alphafold3.common.folding_input.load_fold_inputs_from_dir/path return iterators; the CLI takes len() (run_alphafold.py:596)
     "cached_ccd-as-Ccd",       # alphafold3.constants.chemical_components.cached_ccd(user_ccd=) is Ccd(user_ccd=) in the fork (its own CLI, run_alphafold.py:721)
 )
 
 
-def adapt():
+def _model_dir(argv):
+    """The CLI's --model_dir value in argv (``--model_dir X`` or ``--model_dir=X``), None when absent."""
+    for k, a in enumerate(argv):
+        if a == "--model_dir" and k + 1 < len(argv):
+            return argv[k + 1]
+        if a.startswith("--model_dir="):
+            return a.split("=", 1)[1]
+    return None
+
+
+def adapt(model_dir=None):
     from xfold import of3
     of3.OF3 = True
+    if model_dir:                                                            # the variant the CLI's model must be built for, read off the records before it is built
+        from xfold import params as xparams
+        of3.set_variant(xparams.detect_variant(xparams.load_params(model_dir)))
     from alphafold3.common import folding_input
     for name in ("load_fold_inputs_from_dir", "load_fold_inputs_from_path"):
         setattr(folding_input, name, (lambda f: (lambda *a, **k: list(f(*a, **k))))(getattr(folding_input, name)))
@@ -32,7 +46,7 @@ def adapt():
 def main():
     if len(sys.argv) < 2:
         sys.exit("stock_launch.py: usage: stock_launch.py <run_alphafold.py> [flags…]")
-    adapt()
+    adapt(_model_dir(sys.argv[2:]))
     sys.argv = sys.argv[1:]
     runpy.run_path(sys.argv[0], run_name="__main__")
 

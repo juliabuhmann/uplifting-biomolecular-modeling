@@ -68,8 +68,8 @@ class GridSelfAttention(nn.Module):
 
         pair = self.act_norm(pair)
         nonbatched_bias = self.pair_bias_projection(pair).permute(2, 0, 1)
-        if self.transpose and of3.OF3:
-            # OpenFold3 computes the pair bias from transposed z for the column-wise attention
+        if self.transpose and of3.column_bias_transposed():
+            # OpenFold3 preview-2 computes the pair bias from transposed z for the column-wise attention; openbind (>= 0.5.0) and AF3 use z[q, k]
             nonbatched_bias = nonbatched_bias.transpose(-1, -2)
 
         if self.transpose:

@@ -122,6 +122,16 @@ def _of3():
         return False
 
 
+def _column_bias_transposed():
+    """True when the column-wise (ending-node) triangle attention takes its pair bias from the transposed pair (xfold/of3.py
+    column_bias_transposed: the OpenFold3 preview-2 layout; False for openbind and AlphaFold 3's own weights, z[q, k])."""
+    try:
+        from xfold import of3
+        return bool(of3.column_bias_transposed())
+    except Exception:
+        return False
+
+
 def census():
     out = {k: dict(v) for k, v in COUNTS.items()}
     out["on"] = sorted(_ON); out["dead"] = dict(_DEAD)
@@ -411,8 +421,8 @@ def _triattn_forward(self, pair, mask, residual=False):
         x = pair if pair.is_contiguous() else pair.contiguous()
         y16, b16 = RFU.ln_linear(x, W["lnw"], W["lnb"], W["Wb"], eps=W["eps"], write_y=True, transpose=bool(self.transpose), planes=True)   # head-plane-major [NOUT, N, N]
         bias5 = b16[:H][None, None]                                        # [1,1,H,N,N] (query i, key j) from untransposed LN(pair) -- as stock; head planes contiguous (the core's bias pass reads unit strides)
-        if self.transpose and _of3():
-            bias5 = bias5.transpose(-1, -2)                                # OF3 weight layout (af3t xfold/of3.py): column attention uses the transposed bias
+        if self.transpose and _column_bias_transposed():
+            bias5 = bias5.transpose(-1, -2)                                # OF3 preview-2 weight layout (af3t xfold/of3.py): column attention uses the transposed bias; openbind / AF3 do not
         qkvg = F.linear(y16, W["Wcat"])                                    # [N',N',4C] bf16
         def heads(t):                                                      # 'b n (h d) -> 1 b h n d' as a strided view
             return t.unflatten(-1, (H, D)).permute(0, 2, 1, 3)[None]

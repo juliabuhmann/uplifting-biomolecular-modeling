@@ -255,8 +255,9 @@ class DiffusionTransformer(nn.Module):
         self.num_super_blocks = self.num_blocks // self.super_block_size
 
         self.of3 = of3.OF3
-        if self.of3:
-            # OF3 layout: every block owns a pair LayerNorm (no offset) + Linear(c_pair, num_head)
+        self.per_block_pair_bias = of3.per_block_pair_bias()   # OF3 preview-2 only; AF3's own weights and OF3 openbind share the super-block layout below
+        if self.per_block_pair_bias:
+            # OF3 preview-2 layout: every block owns a pair LayerNorm (no offset) + Linear(c_pair, num_head)
             self.pair_input_layer_norm = nn.ModuleList(
                 [fastnn.LayerNorm(self.c_pair_cond, bias=False) for _ in range(self.num_blocks)])
             self.pair_logits_projection = nn.ModuleList(
@@ -273,7 +274,7 @@ class DiffusionTransformer(nn.Module):
 
     def pair_logits_for_block(self, pair_cond: torch.Tensor, block_idx: int, _cache: dict) -> torch.Tensor:
         """[num_head, N, N] pair logits for block `block_idx` (both layouts). `_cache` memoises per-superblock work."""
-        if self.of3:
+        if self.per_block_pair_bias:
             pair_act = self.pair_input_layer_norm[block_idx](pair_cond)
             return einops.rearrange(self.pair_logits_projection[block_idx](pair_act), 'n s h -> h n s')
         sb, j = divmod(block_idx, self.super_block_size)
