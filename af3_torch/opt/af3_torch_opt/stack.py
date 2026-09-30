@@ -7,7 +7,7 @@ subprocesses per prediction (cli.py): ``featurise.py`` under ``AF3_TORCH_JAX_PY`
 
   AF3_TORCH_PY          the torch venv's interpreter (required, no default: REQUIRED below; unset → refused by name)
   AF3_TORCH_JAX_PY      the JAX venv's interpreter — the fork for featurisation / post-processing (required, no default)
-  AF3_TORCH_PARAMS_DIR  the converted OpenFold3-preview2 parameters: <dir>/of3_ported_weights.bin.zst (no default: the tree ships no weights)
+  AF3_TORCH_PARAMS_DIR  the converted OpenFold3 parameters (preview-2 or openbind; the records say which): <dir>/of3_ported_weights.bin.zst (no default: the tree ships no weights)
   AF3_TORCH_CACHE_ROOT  the JIT caches (Triton, Inductor, JAX compilation) and opt_core's byte-gate stamps — <root>/triton, <root>/inductor, <root>/jax, <root>/verdict
   AF3_TORCH_JAX_REPO    the fork checkout whose run_alphafold.py the writers are imported from (required, no default)
   AF3_TORCH_GPU         the target GPU class (reported: gpu_target on the activation report and the ACTIVE line)
@@ -79,8 +79,12 @@ def pins() -> dict:
 
 
 def checkpoint() -> str:
-    """The pinned checkpoint's file name (stock/PINS.json variants.p2.converted.file — the one spelling; stock/check_pins.py reads the same key)."""
-    return pins()["variants"]["p2"]["converted"]["file"]
+    """The pinned checkpoint's file name (stock/PINS.json variants.*.converted.file — the one spelling every variant shares, p2 and ob alike;
+    stock/check_pins.py reads the same key)."""
+    names = sorted({spec["converted"]["file"] for spec in pins()["variants"].values()})
+    if len(names) != 1:
+        raise ActivationError(f"stock/PINS.json variants name {len(names)} converted file spellings ({', '.join(names)}); the kit expects one")
+    return names[0]
 _STATE: Dict[str, Optional[dict]] = {"report": None}
 
 
@@ -98,8 +102,8 @@ def params_dir() -> Optional[str]:
 
 # The weights this process runs (warn-and-run): AF3_TORCH_PARAMS_DIR's ONE parameters file — the pinned name when it is there, else the
 # directory's single *.bin.zst | *.bin of any name — is THE checkpoint. Its sha256 comes through the kit-local digest memo (digest_memo.py,
-# `<AF3_TORCH_CACHE_ROOT>/weights_digests.json`: `check` hashes afresh, `pred` reads a matching entry; the digest alone decides); a digest equal to stock/PINS.json variants.p2.converted.sha256 is the pinned checkpoint
-# (`weights=OpenFold3-preview2 sha256=<12> (pinned)` on the ACTIVE / STOCK-CLI line), any other digest RUNS with ONE
+# `<AF3_TORCH_CACHE_ROOT>/weights_digests.json`: `check` hashes afresh, `pred` reads a matching entry; the digest alone decides); a digest equal to a stock/PINS.json variants.<v>.converted.sha256 is that variant's pinned checkpoint
+# (`weights=OpenFold3-preview2 sha256=<12> (pinned)` / `weights=OpenFold3-openbind …` on the ACTIVE / STOCK-CLI line), any other digest RUNS with ONE
 # `weights sha256=<12> UNPINNED — …` line (the kit's tests and timings cover the pinned checkpoint only). A directory with several
 # parameter files runs the pinned name when present, else the first in name order (xfold's loader takes a directory's first *.bin.zst | *.bin
 # too, opt/forward/af3t/af3_torch/xfold/params.py:740-743) — the weights line names it; a missing directory or file stays a refusal by name. The resolution rule has ONE producer,
@@ -126,14 +130,14 @@ def resolve_checkpoint(params_dir_: Optional[str] = None):
     *.bin.zst | *.bin in name order, as xfold's own loader picks), or None with the refusal sentence — unset / no parameters file."""
     d = params_dir() if params_dir_ is None else params_dir_
     if not d:
-        return None, "AF3_TORCH_PARAMS_DIR is not set (the directory holding the checkpoint file — the pinned converted OpenFold3-preview2 parameters or your own *.bin.zst | *.bin; configs/<gpu>.env)"
+        return None, "AF3_TORCH_PARAMS_DIR is not set (the directory holding the checkpoint file — the pinned converted OpenFold3 parameters, preview-2 or openbind, or your own *.bin.zst | *.bin; configs/<gpu>.env)"
     ck = checkpoint()
     path, _verdict = pins_tool().resolve_checkpoint(d, ck)
     if path:
         return path, None
     if not os.path.isdir(d):
         return None, f"AF3_TORCH_PARAMS_DIR={d} is not a directory"
-    return None, f"AF3_TORCH_PARAMS_DIR={d} holds no parameters file ({' | '.join('*' + x for x in pins_tool().WEIGHT_SUFFIXES)}; the pinned OpenFold3-preview2 checkpoint is {ck})"
+    return None, f"AF3_TORCH_PARAMS_DIR={d} holds no parameters file ({' | '.join('*' + x for x in pins_tool().WEIGHT_SUFFIXES)}; the pinned OpenFold3 checkpoint of either variant is {ck})"
 
 
 def checkpoint_path() -> Optional[str]:
@@ -148,7 +152,7 @@ def weights_memo_dir() -> str:
 
 def weights_record(path: str, refresh: bool = False) -> dict:
     """{file, name, sha256, bytes, pinned, variant, cached_utc}: the checkpoint's sha256 against stock/PINS.json variants (pinned = the
-    pinned OpenFold3-preview2 bytes). The digest alone decides which checkpoint this is. The digest comes through the kit-local memo (digest_memo:
+    pinned bytes of one variant: OpenFold3-preview2 `p2` or OpenFold3-openbind `ob`; `variant` names it). The digest alone decides which checkpoint this is. The digest comes through the kit-local memo (digest_memo:
     `<cache root>/weights_digests.json`, keyed by the file's realpath, size, mtime and inode — those select a memo entry, they never decide
     that): `check` passes refresh=True (hashed afresh, the entry rewritten); `pred` and the stock route read the entry when its key matches
     (cached_utc = when that digest was computed, named on the line) and hash on a miss. Once per (path, size, mtime) within a process."""

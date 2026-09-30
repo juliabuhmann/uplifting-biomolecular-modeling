@@ -5,7 +5,7 @@
 # launchers at first use), CPython 3.12.1 (python-build-standalone 20240107, the x86-64-v3 build) at /usr/local with uv 0.9.24, and the kit's TWO interpreters as
 # uv virtual environments of that Python: /torch_venv = af3_torch/environment/requirements-torch.lock (torch 2.13.0+cu130, triton 3.7.1, numpy
 # 2.4.1: the model process, AF3_TORCH_PY) and /alphafold3_venv = af3_torch/environment/requirements-jax.lock + alphafold3-open 3.1.4 (jax 0.10.2 on
-# CPU: AlphaFold 3's featurisation and output writers, AF3_TORCH_JAX_PY) — the sokrypton/alphafold3 fork at its pinned commit, fetched from
+# CPU: AlphaFold 3's featurisation and output writers, AF3_TORCH_JAX_PY) — the juliabuhmann/alphafold3 fork (sokrypton/alphafold3 plus the openbind weight port) at its pinned commit, fetched from
 # GitHub into /app/alphafold (AF3_TORCH_JAX_REPO: run_alphafold.py, the writers' entry) with the OpenFold3 empty-template convention applied
 # (af3_torch/stock/patches/04_of3_empty_template_restype_gap.diff, STOCK.md) and BUILT HERE into a wheel (one C++ extension: scikit-build-core,
 # cmake, pybind11 — minutes on all cores, ARG BUILD_JOBS caps the jobs), then AlphaFold 3's `build_data` step (the chemical-components data
@@ -66,9 +66,9 @@ COPY af3_torch/stock/wheels/ /tmp/wheels/
 RUN uv venv --python /usr/local/bin/python3.12 --prompt alphafold3-open /alphafold3_venv \
  && grep -v -E '^(#|alphafold3-open==)' /tmp/env/requirements-jax.lock > /tmp/env/jax.txt \
  && uv pip install --no-cache --python /alphafold3_venv/bin/python --no-deps -r /tmp/env/jax.txt \
- && git clone --quiet https://github.com/sokrypton/alphafold3 /app/alphafold && cd /app/alphafold \
- && git checkout --quiet bc32b22ff5902e3daffd5d1f7203d7f2ab6cb997 && git rev-parse HEAD > COMMIT \
- && [ "$(cat COMMIT)" = bc32b22ff5902e3daffd5d1f7203d7f2ab6cb997 ] && rm -rf .git \
+ && git clone --quiet https://github.com/juliabuhmann/alphafold3 /app/alphafold && cd /app/alphafold \
+ && git checkout --quiet 1fff5c4585438cde8c980d8f6b5ffc22083e8d23 && git rev-parse HEAD > COMMIT \
+ && [ "$(cat COMMIT)" = 1fff5c4585438cde8c980d8f6b5ffc22083e8d23 ] && rm -rf .git \
  && patch -p1 < /tmp/stock/04_of3_empty_template_restype_gap.diff \
  && { J="${BUILD_JOBS:-0}"; [ "$J" -gt 0 ] || J=$(nproc --all); } \
  && echo "af3_torch environment: WHEELS_FROM=$WHEELS_FROM, $J build jobs on a $(nproc --all)-core builder" \

@@ -58,17 +58,17 @@
   ]
  },
  "reference": {
-  "name": "alphafold3-open (sokrypton fork)",
-  "repo": "https://github.com/sokrypton/alphafold3",
-  "commit": "bc32b22ff5902e3daffd5d1f7203d7f2ab6cb997",
+  "name": "alphafold3-open (juliabuhmann/alphafold3 add_openbind_porter: the sokrypton fork plus the openbind weight port)",
+  "repo": "https://github.com/juliabuhmann/alphafold3",
+  "commit": "1fff5c4585438cde8c980d8f6b5ffc22083e8d23",
   "patch": {
    "file": "patches/04_of3_empty_template_restype_gap.diff",
    "what": "the OpenFold3 empty-template convention on the fork's side (absent template slots featurised as GAP under of3 weights; alphafold3/model/network/template_modules.py) \u2014 applied to the source tree before the wheel is built (environment/Dockerfile); the tested stack's JAX venv and /app/alphafold carry exactly this change (`patch -p1` in the fork's top directory)"
   },
-  "role": "featurisation and the output writers (the image's JAX venv; featurise.py / postprocess.py), and the weight converter (convert_of3_weights.py at the checkout root: variants.p2.converter)",
+  "role": "featurisation and the output writers (the image's JAX venv; featurise.py / postprocess.py), and the weight converter (convert_of3_weights.py at the checkout root on the checkout's own src/: variants.p2.converter, variants.ob.converter)",
   "artefacts": {
    "dir": "stock/wheels",
-   "note": "binary files of the tested stack with no public URL, read by environment/Dockerfile's prebuilt route (--build-arg WHEELS_FROM=prebuilt) from stock/wheels/ and checked against these digests (README.md 'Setup' says where they come from); the default route makes both from the fork's source at `commit` instead \u2014 the wheel by the fork's own build, the data by its `build_data` step, whose pickles are not byte-stable across runs",
+   "note": "binary files of the tested stack with no public URL, read by environment/Dockerfile's prebuilt route (--build-arg WHEELS_FROM=prebuilt) from stock/wheels/ and checked against these digests (README.md 'Setup' says where they come from); the default route makes both from the fork's source at `commit` instead \u2014 the wheel by the fork's own build, the data by its `build_data` step, whose pickles are not byte-stable across runs \u2014 the two files were built from the parent commit (reference.parent); the descendant's wheel differs only in the JAX-side model files and the converter, none of which the JAX-venv steps execute",
    "files": [
     {
      "file": "alphafold3_open-3.1.4-cp312-cp312-linux_x86_64.whl",
@@ -83,6 +83,11 @@
      "what": "the chemical-components data AlphaFold 3's `build_data` step writes into the installed package (alphafold3/constants/converters/ccd.pickle, ccd_codes.txt, chemical_component_sets.pickle; paths relative to site-packages), as generated in the tested stack \u2014 the step's pickles are not byte-stable across runs, so its output ships instead of the step"
     }
    ]
+  },
+  "parent": {
+   "repo": "https://github.com/sokrypton/alphafold3",
+   "commit": "bc32b22ff5902e3daffd5d1f7203d7f2ab6cb997",
+   "what": "the kit's original reference pin, an ancestor of `commit`: the branch adds the openbind converter (src/alphafold3/model/of3_weight_converter.py, convert_of3_weights.py), the JAX model's of3_openbind switch and its CI; featurisation, the output writers and patch 04 are byte-identical between the two, so a JAX venv built from either serves the featurise / postprocess steps \u2014 only the converter (run on the checkout's source, variants.*.converter) must be at `commit` for the ob variant"
   }
  },
  "image": {
@@ -123,7 +128,7 @@
     "python": "AF3_TORCH_JAX_PY",
     "cwd": "AF3_TORCH_JAX_REPO",
     "args": "--of3_checkpoint <DIR>/checkpoint/of3-p2-155k.pt --output_dir <DIR>",
-    "what": "the reference fork's own converter at `reference.commit` (OpenFold3-preview2 state dict -> AlphaFold 3's parameter-record format, of3_ported_weights.bin.zst, EMA weights); it needs the JAX venv's torch (CPU build, environment/requirements-jax.lock) and zstandard and runs on the CPU in about two minutes; af3_torch_opt/weights.py fetch_and_convert drives it"
+    "what": "the reference fork's own converter at `reference.commit`, run on the checkout's source (PYTHONPATH=<AF3_TORCH_JAX_REPO>/src) so the converter of THAT commit does the conversion whatever the installed wheel (OpenFold3-preview2 state dict -> AlphaFold 3's parameter-record format, of3_ported_weights.bin.zst, EMA weights); it needs the JAX venv's torch (CPU build, environment/requirements-jax.lock) and zstandard and runs on the CPU in about two minutes; af3_torch_opt/weights.py fetch_and_convert drives it"
    },
    "converted": {
     "file": "of3_ported_weights.bin.zst",
@@ -135,7 +140,34 @@
     "file": "of3_conventions.json",
     "sha256": "cfe982d2e997aa84b8c9ed7e9a8549c1c38e862519d871c44cf0906f8f76b39b",
     "bytes": 151
-   }
+   },
+   "layout_words": "preview-2: the diffusion transformer's pair LayerNorm + logits Linear once per block (xfold/of3.py per_block_pair_bias) and the column-wise pair attention's bias from the transposed pair (column_bias_transposed); told from openbind by the converted records themselves (xfold/params.py detect_variant) and by the fork converter's `of3_variant` marker file"
+  },
+  "ob": {
+   "name": "OpenFold3-openbind",
+   "layout": "of3-openbind",
+   "checkpoint": {
+    "file": "of3-ob-2025-06-30-174k.pt",
+    "url": "https://openfold3-data.s3.amazonaws.com/openfold3-parameters/of3-ob-2025-06-30-174k.pt",
+    "sha256": "bd43301c011d5f87580d3e8b548658869433e4488399feb03035ba248f8e29e4",
+    "bytes": 2287872989,
+    "license": "Apache-2.0 (the OpenFold3 parameters, github.com/aqlaboratory/openfold-3)",
+    "what": "the public OpenFold3 >= 0.5.0 (\"openbind\") checkpoint (a torch state dict; s3://openfold3-data/openfold3-parameters/; `run.sh install --weights DIR --fetch --variant ob` downloads it into DIR/checkpoint/ and checks this digest before converting)"
+   },
+   "converter": {
+    "script": "convert_of3_weights.py",
+    "python": "AF3_TORCH_JAX_PY",
+    "cwd": "AF3_TORCH_JAX_REPO",
+    "args": "--of3_checkpoint <DIR>/checkpoint/of3-ob-2025-06-30-174k.pt --output_dir <DIR>",
+    "what": "the same converter as p2's at `reference.commit` (its is_openbind_checkpoint tells the two layouts apart on the state dict's own keys and writes the `of3_variant` marker beside the output); openbind's shared diffusion-transformer pair LayerNorm and per-super-block pair-logits Linear land in AlphaFold 3's own scopes (transformer/pair_input_layer_norm, __layer_stack_with_per_layer/pair_logits_projection) \u2014 a converter older than `reference.commit` (sokrypton bc32b22f) stops on a missing preview-2 key"
+   },
+   "converted": {
+    "file": "of3_ported_weights.bin.zst",
+    "sha256": "d3995ad00cff7ae06ffdc87fa8c51210bec191638120fbc399ab8914a4a11dbb",
+    "bytes": 1369153807
+   },
+   "source": "the public OpenFold3 openbind checkpoint (`checkpoint`) converted by the reference fork's converter (`converter`) \u2014 `run.sh install --weights DIR --fetch --variant ob` does both and judges the result against `converted` (byte-stable: two conversions gave this digest); a file converted elsewhere and placed in DIR is judged the same way",
+   "layout_words": "openbind (OpenFold3 >= 0.5.0): the diffusion transformer's pair LayerNorm once on the transformer with one pair-logits Linear per super block, and the column-wise pair attention's bias from z[q, k] \u2014 both AlphaFold 3's own layout (xfold/of3.py OPENBIND = True: per_block_pair_bias and column_bias_transposed False); every other OpenFold3 difference as p2"
   }
  },
  "stock_proof": {
@@ -154,5 +186,6 @@
   "kernel_cells": {},
   "gate": "one CUDA device; the kit carries no kernel cell table (tests/test_kit_bytes.py holds this block empty; the shared core's providers carry the per-card cells)",
   "triangle_attention": "no kit cell table: the shared core's triangle-attention provider (opt_core.kernels.triattn) carries the per-card cells and lever triattn asks it for the mode's tier word (fast | big) at every (card, dtype, head dim, heads, size) cell"
- }
+ },
+ "variants_note": "Two variants share the converted file name; a directory holds one of them. The model process reads the variant off the converted records (xfold/params.py detect_variant) before it builds the modules \u2014 never off the digest, so an unpinned file of either layout runs as its records say."
 }

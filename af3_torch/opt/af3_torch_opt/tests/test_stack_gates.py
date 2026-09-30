@@ -34,7 +34,7 @@ def test_gates_name_every_missing_thing(monkeypatch, tmp_path):
     assert any(w.startswith(f"AF3_TORCH_JAX_PY={tmp_path / 'no-jax-python'} is not an executable interpreter") for w in why), why
     assert any("AF3_TORCH_PARAMS_DIR is not set" in w for w in why), why
     monkeypatch.setenv("AF3_TORCH_PARAMS_DIR", str(tmp_path))
-    assert any("holds no parameters file (*.bin.zst | *.bin; the pinned OpenFold3-preview2 checkpoint is of3_ported_weights.bin.zst)" in w for w in stack.gates())
+    assert any("holds no parameters file (*.bin.zst | *.bin; the pinned OpenFold3 checkpoint of either variant is of3_ported_weights.bin.zst)" in w for w in stack.gates())
     assert stack.gates(need_params=False) and not any("PARAMS" in w for w in stack.gates(need_params=False))
 
 

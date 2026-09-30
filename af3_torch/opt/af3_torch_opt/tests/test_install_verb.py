@@ -109,7 +109,11 @@ class InstallVerbArguments(unittest.TestCase):
             rc, out, calls = self.run_sh(args)
             self.assertEqual(rc, 2, (args, out)); self.assertEqual(calls, [], (args, calls))   # refused before any interpreter call
         rc, out, _ = self.run_sh([])
-        self.assertEqual(rc, 2); self.assertIn("run.sh install [--weights DIR [--fetch]]", out) # the usage text lists the verb
+        self.assertEqual(rc, 2); self.assertIn("run.sh install [--weights DIR [--fetch] [--variant p2|ob]]", out) # the usage text lists the verb
+        for args in (["install", "--weights", self.tmp, "--variant", "ob"], ["install", "--weights", self.tmp, "--fetch", "--variant", "p3"],
+                     ["install", "--weights", self.tmp, "--fetch", "--variant"]):
+            rc, out, calls = self.run_sh(args)
+            self.assertEqual(rc, 2, (args, out)); self.assertEqual(calls, [], (args, calls))   # --variant goes with --fetch, and is p2 | ob
 
 
 class WeightsStep(unittest.TestCase):
@@ -222,6 +226,35 @@ class WeightsStep(unittest.TestCase):
         def offline(url): raise OSError("network is unreachable")
         rc, text = self.fetch(os.path.join(self.tmp, "offline"), offline)
         self.assertEqual(rc, 1, text); self.assertIn("WEIGHTS FETCH FAILED url=https://example.invalid/of3-p2-155k.pt", text)
+
+    def test_fetch_of_the_openbind_variant(self):
+        """--variant ob: the ob pins' URL and checkpoint name, the converter run with the checkout's src/ first on PYTHONPATH, the verdict naming
+        the openbind checkpoint; a directory holding p2's pinned bytes is judged pinned as p2 whatever --variant says (the variant is the file's)."""
+        ob_blob = b"openbind port test checkpoint\n" * 64
+        opener, urls = self.fetch_fixture(converter_body=(
+            "import os, sys\n"
+            "a = sys.argv[1:]; src = a[a.index('--of3_checkpoint') + 1]; out = a[a.index('--output_dir') + 1]\n"
+            "assert os.path.basename(src) == 'of3-ob-2025-06-30-174k.pt', src\n"
+            "assert os.environ['PYTHONPATH'].split(os.pathsep)[0] == os.path.join(os.environ['AF3_TORCH_JAX_REPO'], 'src'), os.environ.get('PYTHONPATH')\n"
+            "open(os.path.join(out, 'of3_ported_weights.bin.zst'), 'wb').write(%r)\n" % ob_blob))
+        os.makedirs(os.path.join(self.tmp, "fork", "src", "alphafold3"), exist_ok=True)                                  # the checkout's source tree
+        self.pins["variants"]["ob"] = {"name": "OpenFold3-openbind", "layout": "of3-openbind", "source": "the test's openbind bytes",
+                                       "checkpoint": {"file": "of3-ob-2025-06-30-174k.pt", "url": "https://example.invalid/of3-ob-2025-06-30-174k.pt",
+                                                      "sha256": hashlib.sha256(self.CKPT).hexdigest(), "bytes": len(self.CKPT)},
+                                       "converter": {"script": "convert_of3_weights.py"},
+                                       "converted": {"file": "of3_ported_weights.bin.zst", "sha256": hashlib.sha256(ob_blob).hexdigest(), "bytes": len(ob_blob)}}
+        d = os.path.join(self.tmp, "fetched_ob")
+        out = io.StringIO(); rc = self.weights.check(d, pins=self.pins, out=out, fetch=True, opener=opener, variant="ob"); text = out.getvalue()
+        self.assertEqual(rc, 0, text); self.assertEqual(urls, ["https://example.invalid/of3-ob-2025-06-30-174k.pt"])
+        self.assertRegex(text, r"(?s)CONVERT running .*of3-ob-2025-06-30-174k\.pt --output_dir .*variant ob .*PYTHONPATH=.*CONVERT done .*WEIGHTS OK: .* is the pinned OpenFold3-openbind checkpoint")
+        d2 = os.path.join(self.tmp, "p2_judged_as_p2"); os.makedirs(d2)
+        open(os.path.join(d2, "of3_ported_weights.bin.zst"), "wb").write(self.blob)
+        out = io.StringIO(); rc = self.weights.check(d2, pins=self.pins, out=out, variant="ob"); text = out.getvalue()
+        self.assertEqual(rc, 0, text); self.assertIn("is the pinned OpenFold3-preview2 checkpoint", text)
+        out = io.StringIO(); rc = self.weights.check(os.path.join(self.tmp, "none"), pins=self.pins, out=out, variant="ob"); text = out.getvalue()
+        self.assertEqual(rc, 1, text); self.assertIn("WEIGHTS MISSING", text); self.assertIn("--fetch --variant ob", text); self.assertIn("the test's openbind bytes", text)
+        self.assertEqual(self.weights.check(self.tmp, pins=self.pins, out=io.StringIO(), variant="p3"), 2)
+        self.assertEqual(self.weights.main([self.tmp, "--variant"]), 2)
 
     def test_fetch_names_a_failed_conversion(self):
         opener, urls = self.fetch_fixture(converter_body="import sys\nprint('converter transcript line')\nsys.exit(7)\n")

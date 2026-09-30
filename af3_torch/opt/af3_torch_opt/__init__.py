@@ -1,5 +1,5 @@
 """af3_torch_opt — explicit interface to the PyTorch AlphaFold 3 port (xfold @ 22bdeed + OpenFold3-layout patches) running the converted
-OpenFold3-preview2 parameters, with the kit's fused kernels and the DTK FusedDiT add-on.
+OpenFold3 parameters (preview-2 or openbind), with the kit's fused kernels and the DTK FusedDiT add-on.
 
     import af3_torch_opt
     report = af3_torch_opt.enable("fast")        # or "off"; resolves + gates on this box ("fast" is the package default; "off", the stock path, by name)
@@ -19,7 +19,7 @@ mode and would run stock under the variable), as is a value that is not a mode, 
 Modes (`modes.MODES`): "off" = the kit's eager set, no DTK (the port's own baseline),
 "exact" = the stock-kernels base (xfold's shipped fastnn kernels) + the levers byte-equal to it (`registry.EXACT`: bf16 weights, the
 whole-step-graphed sampler) + `template_dedupe` — `off`'s outputs byte for byte (xfold's shipped fastnn kernels); "fast" = the kit's `fastest` set + DTK
-FusedDiT (tier 2), "big" = the memory line on the fast base. One variant: the OpenFold3-preview2 parameters (`p2`: the public checkpoint converted by the reference fork's converter, stock/PINS.json variants).
+FusedDiT (tier 2), "big" = the memory line on the fast base. Two variants of the weights: the OpenFold3-preview2 parameters (`p2`) and the OpenFold3 openbind parameters (`ob`, OpenFold3 >= 0.5.0) — each the public checkpoint converted by the reference fork's converter (stock/PINS.json variants); a weights directory holds one, and the model process reads which off the converted records (xfold/params.py detect_variant).
 
 The contract: `enable(mode, n_gpu=None)` returns the activation report (`active`, `mode`, `lever_set`, `levers`, `dtk`, `n_gpu`, `padding`,
 the interpreters, `params_dir`, `cache_root`, `image`, `upstream`, `package_version`, `reason` when inactive);
@@ -30,7 +30,7 @@ producers gate (`_producers.refuse_if_missing`: `reason=producer_missing:<module
 """
 __version__ = "0.2.16"
 
-VARIANTS = ("p2",)
+VARIANTS = ("p2", "ob")
 _LAZY = {"enable": ("stack", "activate"), "activate": ("stack", "activate"), "check": ("stack", "check"), "status": ("stack", "status"),
          "ActivationError": ("stack", "ActivationError"), "MODES": ("modes", "MODES"), "DEFAULT_MODE": ("modes", "DEFAULT_MODE"), "UnsupportedMode": ("modes", "UnsupportedMode")}
 

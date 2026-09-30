@@ -42,7 +42,7 @@ def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--kit", required=True, help="the af3t kit dir (opt/forward/af3t)")
     ap.add_argument("--dtk-home", required=True, help="the DTK dir (opt/forward/dtk)")
-    ap.add_argument("--params", required=True, help="the pinned OpenFold3-preview2 checkpoint FILE (never a directory: refused by name, rc 2 — the kit's loader would take the first *.bin.zst of a directory)")
+    ap.add_argument("--params", required=True, help="the pinned OpenFold3 checkpoint FILE (preview-2 or openbind: the variant is read off its records, xfold/params.py detect_variant) (never a directory: refused by name, rc 2 — the kit's loader would take the first *.bin.zst of a directory)")
     ap.add_argument("--weights-sha256", default=None, help="the checkpoint's sha256 as the wrapper digested it (recorded in forward.json weights; bookkeeping only)")
     ap.add_argument("--weights-pinned", type=int, choices=(0, 1), default=None, help="1 = the digest is stock/PINS.json's pinned checkpoint (recorded; bookkeeping only)")
     ap.add_argument("--levers", default="", help="comma list of kit lever names ('' = the kit's eager set)")

@@ -4,13 +4,13 @@
 #   run.sh check   [--config h100] [--mode M] [--json] [--no-compile]                   dry run: resolves + gates the mode on this box; nothing is launched (--no-compile, here and on pred: the mode without the kit's torch.compile lever — an alias of MODEL_OPT_LEVERS_OFF=compile; the ACTIVE line says compile=on|off:user|off:mode)
 #   run.sh warm    [--config h100] [--mode M|all] [<fold input json> ...]                 the one-time kernel and cache setup, ahead of the first pred: one short prediction per mode (all = every mode in turn) over synthetic single-chain inputs of 448 / 832 / 1216 tokens, or over the named inputs — fills the Triton / Inductor / JAX caches under AF3_TORCH_CACHE_ROOT; one WARM line per mode (cache files before / after, seconds); a second run finds them warm
 #   run.sh stock   [--config h100] --output_dir <out> (--json_path <json> ... | --input_dir <dir>)   the stock route: xfold's own CLI (run_alphafold.py, the pinned archive's bytes) at its shipped defaults on the composed stock venv ($AF3_TORCH_STOCK_PY, opt/af3_torch_opt/stock_venv.py); no mode, no lever
-#   run.sh install [--weights DIR [--fetch]]                                             the install step: the shared core and this kit installed editable into the python on PATH (pip install -e ../common/opt_core -e opt), xfold's pinned archive made present under stock/ (stock/fetch_upstream.py: fetched from GitHub at the pinned commit when the tree arrived without it), then the pin check (stock/check_pins.py: the two interpreters AF3_TORCH_PY / AF3_TORCH_JAX_PY at their pins); --weights DIR checks the converted checkpoint under DIR against stock/PINS.json — with --fetch, a DIR without one gets it: the public OpenFold3-preview2 checkpoint is downloaded and converted with the reference fork's converter (README.md 'Install') — DIR is then your AF3_TORCH_PARAMS_DIR
+#   run.sh install [--weights DIR [--fetch] [--variant p2|ob]]                          the install step: the shared core and this kit installed editable into the python on PATH (pip install -e ../common/opt_core -e opt), xfold's pinned archive made present under stock/ (stock/fetch_upstream.py: fetched from GitHub at the pinned commit when the tree arrived without it), then the pin check (stock/check_pins.py: the two interpreters AF3_TORCH_PY / AF3_TORCH_JAX_PY at their pins); --weights DIR checks the converted checkpoint under DIR against stock/PINS.json — with --fetch, a DIR without one gets it: the public OpenFold3 checkpoint of --variant (p2 = preview-2, the default; ob = openbind, OpenFold3 >= 0.5.0) is downloaded and converted with the reference fork's converter (README.md 'Install') — DIR is then your AF3_TORCH_PARAMS_DIR
 # --config <cfg> sources configs/<cfg>.env: deployment parameters only (the two interpreters, the parameters dir, the cache root, the target GPU).
 # Modes: off | exact | fast | big (the memory line). Mode = --mode when given, else AF3_TORCH_OPT from the environment, else the package default (opt/af3_torch_opt/modes.py, the one mode
 # table); a --mode that disagrees with a set AF3_TORCH_OPT is refused. Modes are validated by the package alone (modes.py resolves a mode
 # to one of the kit's own lever sets, opt/forward/af3t/af3_torch/af3_torch_api.py LEVER_SETS); this script carries no table and validates
 # none. `--mode off` is stock on this route (xfold as shipped: the kit's eager set with xfold's fastnn kernels on, no padding, no DTK, the same 5-sample form, in a model process
-# whose environment carries no AF3_TORCH_OPT* variable — the STOCK line proves it); the stock route is `run.sh stock` (xfold's own CLI). One variant (the OpenFold3-preview2 parameters at AF3_TORCH_PARAMS_DIR): no --variant switch.
+# whose environment carries no AF3_TORCH_OPT* variable — the STOCK line proves it); the stock route is `run.sh stock` (xfold's own CLI). Two variants of the weights (preview-2 `p2`, openbind `ob`); a weights directory holds one and the model process reads which off the records, so --variant belongs to `install --fetch` alone.
 # Every route refuses (rc 3) unless the pinned stack is installed (stock/check_pins.py: the two interpreters' pinned packages — its
 # diagnostic line is printed above the refusal) and the package is installed. Exit codes: 0 ok, 1 failed, 2 usage, 3 not active / pins not met / partial (a degraded lever set; --allow-partial accepts it, said on the DONE line).
 set -euo pipefail
@@ -28,18 +28,22 @@ while [ $# -gt 0 ]; do
 done
 case "$CMD" in pred|check|stock|install|warm) ;; *) usage ;; esac
 if [ "$CMD" = install ]; then                                       # the install step: everything below it presupposes the installed package
-  WEIGHTS=""; FETCH=()
-  [ -z "$CFG" ] && [ -z "$MODE" ] || { echo "run.sh: install takes no --config / --mode (usage: run.sh install [--weights DIR [--fetch]])" >&2; exit 2; }
+  WEIGHTS=""; FETCH=(); VARIANT=()
+  [ -z "$CFG" ] && [ -z "$MODE" ] || { echo "run.sh: install takes no --config / --mode (usage: run.sh install [--weights DIR [--fetch] [--variant p2|ob]])" >&2; exit 2; }
   set -- ${ARGS[@]+"${ARGS[@]}"}
   while [ $# -gt 0 ]; do
     case "$1" in
-      --weights) [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || { echo "run.sh: install --weights takes a directory (usage: run.sh install [--weights DIR [--fetch]])" >&2; exit 2; }; WEIGHTS=$2; shift 2 ;;
+      --weights) [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || { echo "run.sh: install --weights takes a directory (usage: run.sh install [--weights DIR [--fetch] [--variant p2|ob]])" >&2; exit 2; }; WEIGHTS=$2; shift 2 ;;
       --weights=*) WEIGHTS=${1#*=}; [ -n "$WEIGHTS" ] || { echo "run.sh: install --weights= takes a directory" >&2; exit 2; }; shift ;;
       --fetch) FETCH=(--fetch); shift ;;
-      *) echo "run.sh: install takes no argument '$1' (usage: run.sh install [--weights DIR [--fetch]])" >&2; exit 2 ;;
+      --variant) [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || { echo "run.sh: install --variant takes a word (p2 | ob)" >&2; exit 2; }; VARIANT=(--variant "$2"); shift 2 ;;
+      --variant=*) [ -n "${1#*=}" ] || { echo "run.sh: install --variant= takes a word (p2 | ob)" >&2; exit 2; }; VARIANT=(--variant "${1#*=}"); shift ;;
+      *) echo "run.sh: install takes no argument '$1' (usage: run.sh install [--weights DIR [--fetch] [--variant p2|ob]])" >&2; exit 2 ;;
     esac
   done
   [ ${#FETCH[@]} -eq 0 ] || [ -n "$WEIGHTS" ] || { echo "run.sh: install --fetch goes with --weights DIR (the directory the checkpoint is fetched and converted into)" >&2; exit 2; }
+  [ ${#VARIANT[@]} -eq 0 ] || [ ${#FETCH[@]} -ne 0 ] || { echo "run.sh: install --variant goes with --weights DIR --fetch (it names the public checkpoint to download and convert; a directory's variant is read off its records)" >&2; exit 2; }
+  case "${VARIANT[1]:-p2}" in p2|ob) ;; *) echo "run.sh: install --variant ${VARIANT[1]} is not p2 | ob (stock/PINS.json variants)" >&2; exit 2 ;; esac
   command -v python >/dev/null || { echo "run.sh: no python on PATH — activate the environment this kit installs into (README.md Install)" >&2; exit 3; }
   if python -I -c "import os,sys,importlib.util as u; t=[os.path.realpath(p) for p in sys.argv[1:3]]; s=[u.find_spec(n) for n in ('af3_torch_opt','opt_core')]; sys.exit(0 if all(x and x.origin and os.path.realpath(x.origin).startswith(d+os.sep) for x,d in zip(s,t)) else 1)" "$HERE/opt" "$HERE/../common/opt_core" 2>/dev/null; then
     echo "run.sh: af3_torch_opt and opt_core are installed from this tree already ($HERE/opt, $HERE/../common/opt_core) — the pip step is skipped"   # the container image ships them installed; a read-only image cannot re-run pip
@@ -48,7 +52,7 @@ if [ "$CMD" = install ]; then                                       # the instal
   fi
   python -I "$HERE/stock/fetch_upstream.py" || { echo "run.sh: the install stopped at xfold's pinned archive (stock/fetch_upstream.py: the line above names the remedy)" >&2; exit 1; }   # present in the tree, or fetched from GitHub at the pinned commit
   env -u AF3_TORCH_OPT python -I "$HERE/stock/check_pins.py" || { echo "run.sh: installed, but refused by the pin check (stock/check_pins.py: the line above — AF3_TORCH_PY / AF3_TORCH_JAX_PY must name the two interpreters of the pinned stack, README.md Variables)" >&2; exit 3; }
-  if [ -n "$WEIGHTS" ]; then env -u AF3_TORCH_OPT python -m af3_torch_opt.weights "$WEIGHTS" ${FETCH[@]+"${FETCH[@]}"} || exit $?; fi   # the converted checkpoint under DIR checked against stock/PINS.json (opt/af3_torch_opt/weights.py); --fetch downloads + converts it when DIR has none
+  if [ -n "$WEIGHTS" ]; then env -u AF3_TORCH_OPT python -m af3_torch_opt.weights "$WEIGHTS" ${FETCH[@]+"${FETCH[@]}"} ${VARIANT[@]+"${VARIANT[@]}"} || exit $?; fi   # the converted checkpoint under DIR checked against stock/PINS.json (opt/af3_torch_opt/weights.py); --fetch downloads + converts it (of --variant) when DIR has none
   exit 0
 fi
 # The seed block runs before the config is sourced: configs/<card>.env derives AF3_TORCH_CACHE_ROOT from the MODEL_OPT_JIT_ROOT it exports.

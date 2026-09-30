@@ -5,9 +5,10 @@ Checks: (1) the two interpreters (--torch-py / --jax-py, default $AF3_TORCH_PY /
 named and fails): each exists and reports every package of PINS `check_packages` at
 the pinned version (torch + triton on the torch venv, jax + jaxlib on the JAX venv); (2) with --digest, the checkpoint under
 $AF3_TORCH_PARAMS_DIR (the pinned file name, else the directory's one *.bin.zst | *.bin — the package's own rule) digested against PINS
-`variants.p2.converted`: pinned (the pinned bytes) or UNPINNED (any other digest — it runs; the kit's tests and timings cover the
-pinned checkpoint only; ONE `weights sha256=<12> UNPINNED — …` line) both pass, a missing checkpoint fails; `variants.p2.conventions`
-(an optional layout record beside the checkpoint) is reported, not judged. The upstream archive (PINS `upstream.archive`, read by the
+`variants.*.converted` (p2 = OpenFold3-preview2, ob = OpenFold3-openbind; one converted file name, a directory holds one of them):
+pinned (the pinned bytes of either variant — the report's `variant` names it) or UNPINNED (any other digest — it runs; the kit's tests and
+timings cover the pinned checkpoints only; ONE `weights sha256=<12> UNPINNED — …` line) both pass, a missing checkpoint fails;
+`variants.*.conventions` (an optional layout record beside the checkpoint) is reported, not judged. The upstream archive (PINS `upstream.archive`, read by the
 stock route only) is inventory, not a verdict: absent, the text report names it on one `PINS inventory …` line with the install step that
 fetches it (stock/fetch_upstream.py). Exit 0 when (1) holds (and (2) when asked), 3 otherwise; the report is printed as text or JSON
 (--quiet: text only when not met). Needs nothing beyond the standard library.
@@ -82,26 +83,36 @@ def resolve_checkpoint(root, pinned):
 
 def digest_report(pins):
     """--digest: the checkpoint under $AF3_TORCH_PARAMS_DIR resolved as the package resolves it and digested against `variants`: verdict
-    pinned (the pinned bytes) | unpinned (any other digest: it RUNS — the kit's tests and timings cover the pinned checkpoint only;
-    not a failure of this check) | missing (a failure). The optional conventions record beside the checkpoint is reported, not judged."""
+    pinned (the pinned bytes of ONE variant — `variant` names it; the variants share a file name, so a directory holds at most one) |
+    unpinned (any other digest: it RUNS — the kit's tests and timings cover the pinned checkpoints only; not a failure of this check) |
+    missing (a failure). One verdict for the directory; each variant's row says whether the file is ITS pinned bytes. The optional
+    conventions record beside the checkpoint is reported, not judged."""
     root = os.environ.get("AF3_TORCH_PARAMS_DIR")
-    rep = {"params_dir": root, "variants": {}, "ok": True, "verdict": None, "sha256": None, "file": None}
+    rep = {"params_dir": root, "variants": {}, "ok": True, "verdict": None, "sha256": None, "file": None, "variant": None}
+    digests = {}                                                                  # path -> (sha256, bytes): hashed once however many variants name it
     for v, spec in pins["variants"].items():
         path, none_verdict = resolve_checkpoint(root, spec["converted"]["file"])
-        got = sha256(path) if path else None
-        nbytes = os.path.getsize(path) if path else None
+        if path and path not in digests:
+            digests[path] = (sha256(path), os.path.getsize(path))
+        got, nbytes = digests[path] if path else (None, None)
         pinned = got is not None and got == spec["converted"]["sha256"] and nbytes == spec["converted"].get("bytes", nbytes)
-        verdict = none_verdict or ("pinned" if pinned else "unpinned")
         rep["variants"][v] = {"file": path, "present": bool(path), "sha256": got, "bytes": nbytes, "expected": spec["converted"]["sha256"],
-                              "expected_bytes": spec["converted"].get("bytes"), "pinned": pinned, "verdict": verdict, "ok": verdict in ("pinned", "unpinned")}
+                              "expected_bytes": spec["converted"].get("bytes"), "pinned": pinned, "verdict": none_verdict, "ok": None}
         conv = spec.get("conventions")
         if conv:
             cpath = os.path.join(root, conv["file"]) if root else None
             cpresent = bool(cpath) and os.path.isfile(cpath)
             cgot = sha256(cpath) if cpresent else None
             rep["variants"][v]["conventions"] = {"file": conv["file"], "present": cpresent, "sha256": cgot, "expected": conv["sha256"], "ok": cgot == conv["sha256"]}
-        rep["ok"] &= rep["variants"][v]["ok"]
-        rep["verdict"], rep["sha256"], rep["file"] = verdict, got, path
+        if pinned and rep["variant"] is None:
+            rep["variant"], rep["sha256"], rep["file"] = v, got, path
+    if rep["variant"] is None:                                                    # no variant's bytes: the first present file, else missing
+        present = next((r for r in rep["variants"].values() if r["present"]), None)
+        rep["sha256"], rep["file"] = (present["sha256"], present["file"]) if present else (None, None)
+    rep["verdict"] = "pinned" if rep["variant"] else ("unpinned" if rep["file"] else "missing")
+    rep["ok"] = rep["verdict"] in ("pinned", "unpinned")
+    for r in rep["variants"].values():                                            # the one directory verdict on every row (the rows differ in `pinned`)
+        r["verdict"], r["ok"] = rep["verdict"], rep["ok"]
     return rep
 
 
@@ -142,7 +153,7 @@ def main(argv=None):
                     print(f"  {which} {n}: expected {d['expected']} got {d['actual']}")
         if a.digest:
             for v, d in rep["digest"]["variants"].items():
-                print(f"  params {v}: {'ok' if d['ok'] else ('absent' if not d['present'] else 'MISMATCH ' + d['sha256'][:16])}")
+                print(f"  params {v}: {('pinned' if d['pinned'] else 'unpinned') if d['ok'] else ('absent' if not d['present'] else 'MISMATCH ' + d['sha256'][:16])}")
         u = pins["upstream"]                      # inventory, not a verdict: the stock route's input, which `run.sh install` fetches when the tree arrived without it
         if not os.path.isfile(os.path.join(HERE, u["archive"]["file"])):
             print(f"[af3-torch-opt] PINS inventory upstream_archive=absent file=stock/{u['archive']['file']} (read by `run.sh stock` only; `run.sh install` fetches it: "
