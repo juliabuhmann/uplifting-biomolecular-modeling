@@ -5,13 +5,17 @@
 Upstream: xfold, https://github.com/Shenggan/xfold at commit `22bdeedfa309ef4ff6f9199910d8403915de69d6`, shipped under `stock/` as GitHub's
 source archive of that commit (`stock/xfold-22bdeed.tar.gz`; `bash run.sh install` fetches it from GitHub when the tree arrives without it —
 `stock/fetch_upstream.py`); upstream's Apache-2.0 licence and the per-file notices of its AlphaFold 3-derived files as found. Featurisation, the
-output writers and the weight converter come from the AlphaFold 3 open-code fork https://github.com/sokrypton/alphafold3 at commit
-`bc32b22ff5902e3daffd5d1f7203d7f2ab6cb997` (the JAX environment; CPU only). Weights: the public OpenFold3-preview2 checkpoint
-(`of3-p2-155k.pt`, URL and sha256 in `stock/PINS.json`; published by the OpenFold3 authors, https://github.com/aqlaboratory/openfold-3, under the
-Apache License 2.0 — `stock/PINS.json` `variants.p2.checkpoint.license`) converted to AlphaFold 3's parameter-record layout by the fork's own
-`convert_of3_weights.py` → `of3_ported_weights.bin.zst` (sha256 in PINS.json), with the optional `of3_conventions.json` beside it;
-`bash run.sh install --weights DIR --fetch` downloads, converts and digest-checks it, `bash run.sh install --weights DIR` checks a file already there.
-One checkpoint; no variant switch. `stock/PINS.json` is the machine-readable pin; `stock/` is never edited.
+output writers and the weight converter come from the AlphaFold 3 open-code fork https://github.com/juliabuhmann/alphafold3 at commit
+`1fff5c4585438cde8c980d8f6b5ffc22083e8d23` (branch `add_openbind_porter`: the sokrypton/alphafold3 fork at `bc32b22ff5902e3daffd5d1f7203d7f2ab6cb997` — the kit's
+original pin, `stock/PINS.json` `reference.parent` — plus the openbind weight port; the JAX environment; CPU only). Weights: one of two public
+OpenFold3 checkpoints (published by the OpenFold3 authors, https://github.com/aqlaboratory/openfold-3, under the Apache License 2.0 —
+`stock/PINS.json` `variants.<v>.checkpoint`): `p2` = OpenFold3-preview2 (`of3-p2-155k.pt`, the default) or `ob` = OpenFold3 openbind
+(OpenFold3 >= 0.5.0, `of3-ob-2025-06-30-174k.pt`), each converted to AlphaFold 3's parameter-record layout by the fork's own
+`convert_of3_weights.py` → `of3_ported_weights.bin.zst` (one file name; sha256 per variant in PINS.json), with the fork converter's `of3_variant`
+marker and the optional `of3_conventions.json` beside it; `bash run.sh install --weights DIR --fetch [--variant p2|ob]` downloads, converts and
+digest-checks it, `bash run.sh install --weights DIR` checks a file already there. A weights directory holds ONE variant; the model process reads
+which off the converted records (`xfold/params.py` `detect_variant`) before it builds the modules, so no run-time switch exists and a file of
+either layout runs as its records say. `stock/PINS.json` is the machine-readable pin; `stock/` is never edited.
 
 ## Stack
 
@@ -39,8 +43,8 @@ uv pip install --python /torch_venv/bin/python --no-deps -r /tmp/torch.txt
 uv venv --managed-python --python 3.12 /alphafold3_venv                    # 2. the JAX environment: the lock minus the fork's own wheel
 grep -v -E '^(#|alphafold3-open==)' af3_torch/environment/requirements-jax.lock > /tmp/jax.txt
 uv pip install --python /alphafold3_venv/bin/python --no-deps -r /tmp/jax.txt
-git clone https://github.com/sokrypton/alphafold3 /app/alphafold            # 3. the fork at the pin, patched, built (minutes on all cores), installed
-git -C /app/alphafold checkout bc32b22ff5902e3daffd5d1f7203d7f2ab6cb997 && rm -rf /app/alphafold/.git   # without .git the wheel builds as 3.1.4
+git clone https://github.com/juliabuhmann/alphafold3 /app/alphafold         # 3. the fork at the pin, patched, built (minutes on all cores), installed
+git -C /app/alphafold checkout 1fff5c4585438cde8c980d8f6b5ffc22083e8d23 && rm -rf /app/alphafold/.git   # without .git the wheel builds as 3.1.4
 patch -d /app/alphafold -p1 < af3_torch/stock/patches/04_of3_empty_template_restype_gap.diff
 grep -E '^numpy==' /tmp/jax.txt > /tmp/constraints.txt
 CC=gcc CXX=g++ uv build --wheel --python 3.12 --build-constraint /tmp/constraints.txt --out-dir /tmp/wheels /app/alphafold
@@ -48,7 +52,7 @@ uv pip install --python /alphafold3_venv/bin/python --no-deps /tmp/wheels/alphaf
 /alphafold3_venv/bin/build_data                                            #    required: AlphaFold 3's chemical-components data step inside the installed package
 export AF3_TORCH_PY=/torch_venv/bin/python AF3_TORCH_JAX_PY=/alphafold3_venv/bin/python AF3_TORCH_JAX_REPO=/app/alphafold PYTHONHASHSEED=0 CFLAGS=-g0
 uv venv --seed --managed-python --python 3.12 /kit/venv && . /kit/venv/bin/activate   # 4. the python run.sh installs into and runs on (any released CPython >= 3.10 with pip)
-cd af3_torch && bash run.sh install [--weights DIR [--fetch]]   # 5. = README step 2's install line — type it once; step 2 continues at its export line
+cd af3_torch && bash run.sh install [--weights DIR [--fetch] [--variant p2|ob]]   # 5. = README step 2's install line — type it once; step 2 continues at its export line
 ```
 
 The paths are the image's; any three of your own do. `PYTHONHASHSEED=0` and `CFLAGS=-g0` are the image's run-time environment (the kit sets the fork's XLA
@@ -83,6 +87,12 @@ shipped defaults on the stock venv; it takes no mode.
   fork's atom cross-attention encoder mirrored (query single conditioning masked by the query mask; the keys' `ref_space_uid` gathered from the
   queries layout); the four corrections of README §Known upstream issues; and the entry points the `hoist` / `stepgraph` levers call, inert unless a
   mode enables them. Applied identically on every mode, `off` and `bash run.sh stock` included.
+- The port's openbind switch (`xfold/of3.py` `OPENBIND`, set by `af3_torch_api.build_model` and the stock launcher from the converted records,
+  `xfold/params.py` `detect_variant`): under the openbind checkpoint (OpenFold3 >= 0.5.0) two of the preview-2 divergences above are off — the
+  diffusion transformer's pair LayerNorm runs once on the transformer with one pair-logits Linear per super block, and the column-wise pair
+  attention's bias is `Linear(z[q, k])` — both AlphaFold 3's own layout (the JAX fork's `global_config.of3_openbind`). `xfold/nn/diffusion_transformer.py`,
+  `xfold/nn/attention.py`, `xfold/params.py` and the kit's triangle-attention adapter (`kernels/af3_kernels.py`) branch on it; the row-sharded
+  adapter (`n_gpu` > 1) refuses openbind by name. Every mode.
 - `stock/patches/04_equivalent_template_gap.diff` — absent template slots are featurised as GAP (restype 21, the OpenFold3 convention the weights
   were trained with) instead of ALA in `xfold/nn/template.py`; the fork-side twin `04_of3_empty_template_restype_gap.diff` does the same in the
   fork's template network. Every mode.
@@ -98,7 +108,7 @@ shipped defaults on the stock venv; it takes no mode.
 | `AF3_TORCH_PY` | yes | — (image: `/torch_venv/bin/python`) | the torch environment's interpreter: the model process |
 | `AF3_TORCH_JAX_PY` | yes | — (image: `/alphafold3_venv/bin/python`) | the JAX environment's interpreter: featurisation, the writers, the weight converter |
 | `AF3_TORCH_JAX_REPO` | yes | — (image: `/app/alphafold`) | the fork checkout holding `run_alphafold.py` and `convert_of3_weights.py` |
-| `AF3_TORCH_PARAMS_DIR` | yes (pred, check, warm) | — | the directory holding `of3_ported_weights.bin.zst` (else its one `*.bin.zst` / `*.bin`) |
+| `AF3_TORCH_PARAMS_DIR` | yes (pred, check, warm) | — | the directory holding `of3_ported_weights.bin.zst` (else its one `*.bin.zst` / `*.bin`) — the preview-2 or the openbind conversion; the records say which |
 | `AF3_TORCH_CACHE_ROOT` | no | `<MODEL_OPT_JIT_ROOT>/<stack key>` (run.sh exports that root); the config sourced by hand without it: `${TMPDIR:-/tmp}/af3_torch_cache-uid<uid>/<stack key>`, the per-user directory made owner-only and used only when this user owns it and neither a symbolic link nor group- or other-writable stands there — otherwise refused by name and a fresh private directory serves that shell (an explicit value wins; no config sourced: `~/.cache/af3_torch_opt`) | Triton / Inductor / JAX cache root (`<root>/triton`, `/inductor`, `/jax`); must be writable: the caches are created under it on a mode's first run per GPU and stack; the shared core's native triangle-attention row (lever `triattn`) keeps its gate memo beside them, or under `MODEL_OPT_JIT_ROOT` when that is set |
 | `AF3_TORCH_STOCK_PY` | `stock` only | — (unset: `stock` prints `NOT ACTIVE reason=…` and exits 3) | the stock venv's interpreter (`opt/af3_torch_opt/stock_cli.py`): `DIR/bin/python` of the venv `python -m af3_torch_opt.stock_venv --dest DIR` built; an interpreter, or a directory holding it, that belongs to another account (neither you nor root) or that others can write is refused by name (exit 3) |
 | `AF3_TORCH_GPU` | no | `H100` (`configs/h100.env`), `H200` (`configs/h200.env`), `A100` (`configs/a100.env`) | the target card word, reported as `gpu_target` on the ACTIVE line; read for the compute capability only when `nvidia-smi` cannot name the card |

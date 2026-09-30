@@ -1,7 +1,7 @@
 # AF3-torch (xfold on OpenFold3 weights) — optimization kit
 
 Drop-in modes that make stock xfold — PyTorch AlphaFold 3, `run_alphafold.py`, at the pin in `STOCK.md`, on the converted
-OpenFold3-preview2 weights — faster and lighter on GPU memory. Stock here is xfold plus the port to these weights (`STOCK.md`;
+OpenFold3 weights (preview-2 or openbind, see 'Weights') — faster and lighter on GPU memory. Stock here is xfold plus the port to these weights (`STOCK.md`;
 'stock' below always means this). You call `run_alphafold.py` exactly as before; the kit adds a `--mode`:
 
 - `off` — stock exactly, through the kit's process chain.
@@ -58,7 +58,8 @@ What the blocks assume:
 
 - **Weights.** `AF3_TORCH_PARAMS_DIR` names the directory holding `of3_ported_weights.bin.zst` — under A and B the container
   path `/weights/af3_torch` that `<weights dir>` is bound to. `install --weights DIR --fetch` downloads and converts the
-  checkpoint when the directory is empty; without `--fetch` it hash-checks the file already there (read-only is fine).
+  checkpoint when the directory is empty (`--variant ob` for the openbind checkpoint, 'Weights' below); without `--fetch` it
+  hash-checks the file already there (read-only is fine).
 - **Route C** is three uv-managed Python 3.12 environments: torch for the model; JAX with the alphafold3 fork built from
   source for featurisation and the writers; one for `run.sh`. The recipe ends by exporting `AF3_TORCH_PY`, `AF3_TORCH_JAX_PY`
   and `AF3_TORCH_JAX_REPO`, which the image presets.
@@ -67,6 +68,22 @@ What the blocks assume:
 - **GPU cards.** `--config h100|a100|h200` loads `configs/<card>.env`.
 - **Compile cache.** A mode's first run at a token length compiles and autotunes kernels under `AF3_TORCH_CACHE_ROOT`, which
   the config sets; `bash run.sh warm --config h100 --mode M|all` does it ahead of time.
+
+## Weights: preview-2 or openbind
+
+Two public OpenFold3 checkpoints run here, each converted by the reference fork's `convert_of3_weights.py` (`STOCK.md` Pin):
+
+| `--variant` | checkpoint | release | what differs in the model |
+|---|---|---|---|
+| `p2` (default) | `of3-p2-155k.pt` | OpenFold3-preview2 | the port as shipped: a pair LayerNorm + logits Linear per diffusion-transformer block, column-wise pair attention biased from the transposed pair |
+| `ob` | `of3-ob-2025-06-30-174k.pt` | OpenFold3 >= 0.5.0 ("openbind") | those two back in AlphaFold 3's own layout (one shared LayerNorm + one Linear per super block; bias from `z[q, k]`); everything else as `p2` |
+
+`bash run.sh install --weights DIR --fetch --variant ob` downloads and converts the openbind checkpoint into an (empty) DIR; one directory
+holds one variant, and the ACTIVE line's `weights=` token names the pinned one it found (`OpenFold3-preview2` / `OpenFold3-openbind`).
+Nothing else changes between the two: the model process reads the variant off the converted records themselves before it builds the
+modules (`xfold/params.py detect_variant`), so a converted file of either layout — pinned or not — runs as its records say, and a
+directory converted by an older converter (no `of3_variant` marker) is read the same way. Under `n_gpu` > 1 the row-sharded adapter
+refuses the openbind layout by name (its ending-node bias form is not wired); run openbind on one GPU.
 
 ## Run
 

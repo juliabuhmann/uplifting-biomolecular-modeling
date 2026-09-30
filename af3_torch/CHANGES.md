@@ -92,3 +92,17 @@ reason=n_gpu_mismatch`.
 - `--no-compile` — alias of `MODEL_OPT_LEVERS_OFF=compile`; `compile=on|off:user|off:mode` on the ACTIVE line. `--allow-partial` — a run whose model process
   applied fewer levers than the mode names exits 0 instead of 3 (`partial=allowed:…` on the DONE line). `--fastnn` / `--nofastnn` — xfold's own flag: served
   under `off` (both) and `exact` (`--fastnn` only); refused by name under `fast` / `big`.
+
+## Weights: the openbind variant
+
+- `variants.ob` in `stock/PINS.json`: the public OpenFold3 openbind checkpoint (OpenFold3 >= 0.5.0, `of3-ob-2025-06-30-174k.pt`) converted by
+  the reference fork's converter — the fork pin moves to `juliabuhmann/alphafold3` @ `1fff5c45` (branch `add_openbind_porter`, a descendant of
+  the sokrypton pin that adds the openbind converter; featurisation and the writers are byte-identical). `run.sh install --weights DIR --fetch
+  --variant ob` obtains it; the converter runs on the checkout's own `src/` so the pinned commit's converter converts whatever wheel the JAX
+  venv carries. Both variants share the converted file name; the digest judge names the variant a directory holds (`variant` in the report).
+- The port reads the variant off the converted records (`xfold/params.py detect_variant`: openbind's shared `transformer/pair_input_layer_norm`
+  record vs preview-2's per-block stack) before the modules are built (`af3_torch_api.build_model`, `stock_launch.py`) and sets
+  `xfold/of3.py OPENBIND`; a flag / records mismatch is refused by name (`check_layout_flags`). Under openbind the diffusion transformer takes
+  xfold's AlphaFold 3 super-block pair-bias path and the column-wise pair attention (eager and the `triattn` kernel adapter) leaves the bias
+  untransposed — the JAX fork's `of3_openbind` switch, mirrored; every other OpenFold3 difference applies as before. Every mode. The row-sharded
+  adapter (`n_gpu` > 1) refuses openbind by name.
