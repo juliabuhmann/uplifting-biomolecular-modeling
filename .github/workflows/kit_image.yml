@@ -18,7 +18,7 @@ on:
         required: true
         default: af3_jax
         type: choice
-        options: [af3_jax, openfold3_ob0]
+        options: [af3_jax, openfold3_ob0, af3_torch]
       tag:
         description: "image tag (default: the short commit)"
         required: false
