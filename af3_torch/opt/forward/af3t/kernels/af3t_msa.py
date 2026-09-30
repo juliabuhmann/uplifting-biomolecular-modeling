@@ -34,6 +34,7 @@ OPM_ROWS = 256                      # left tokens per outer-product chunk: the b
 OPM_CELLS = {                       # (BA rows per LayerNorm/projection program, BD right tokens per contraction program, warps) per compute-capability major; measured
     9: dict(BA=64, BD=64, warps=4),  # H100
     8: dict(BA=64, BD=64, warps=4),  # A100
+    12: dict(BA=64, BD=64, warps=4), # RTX PRO 6000 Blackwell (cc 12.0): the H100 cell, UNMEASURED by the kit -- local patch, scripts/af3torch/04_patch_opm_sm120.sh
 }
 _SERVED = dict(c_msa=64, c_outer=32, c_z=128)   # the kernels' shapes (tl.dot tiles: c_m 64 = K, 32 outer channels, 128 = the accumulator width)
 
