@@ -108,11 +108,13 @@ COPY common/opt_core /kit/common/opt_core
 COPY af3_torch /kit/af3_torch
 WORKDIR /kit/af3_torch
 RUN uv venv --seed --python /usr/local/bin/python3.12 /kit/venv && bash run.sh install
-# [install]-jitcache: optional pre-filled compile caches (build is identical when no tar is present)
-COPY af3_torch/environment/Dockerfile _jitcache/af3_torch-*-jit.ta[r] /tmp/jit/
-RUN set -e; mkdir -p /opt/jit_cache; \
-    for t in /tmp/jit/*-jit.tar; do [ -f "$t" ] && tar -xf "$t" -C /opt/jit_cache; done; \
-    chmod -R a+rX,u+w /opt/jit_cache; rm -rf /tmp/jit
+# [install]-jitcache: the release copied an OPTIONAL pre-filled compile cache here
+# (`COPY af3_torch/environment/Dockerfile _jitcache/af3_torch-*-jit.ta[r] /tmp/jit/`). In GitHub Actions that
+# COPY fails with "lstat /_jitcache: no such file or directory" (this fork: af3_jax / openfold3_ob0 runs 4 and 5
+# on 2026-09-22, af3_torch run on 2026-09-30), the same way it did for the other two kits (c8a1147). This fork
+# ships no such cache and the release's own note says the build is identical without one, so the copy is
+# dropped and the cache root is created empty; the kit fills it at first use (AF3_TORCH_CACHE_ROOT / MODEL_OPT_JIT_ROOT).
+RUN mkdir -p /opt/jit_cache && chmod -R a+rX,u+w /opt/jit_cache
 # af3_torch mapping: the kit's own seed home (opt/af3_torch_opt/stack.py: <prefix of AF3_TORCH_PY>/share/af3_torch_cache/<stack key>/{triton,inductor,jax,verdict},
 # copied into the writable AF3_TORCH_CACHE_ROOT on a first pred / warm, Triton group manifests re-rooted) is /opt/jit_cache itself
 RUN mkdir -p /torch_venv/share && ln -s /opt/jit_cache /torch_venv/share/af3_torch_cache
