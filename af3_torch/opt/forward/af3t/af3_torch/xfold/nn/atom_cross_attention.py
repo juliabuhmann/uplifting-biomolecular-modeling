@@ -28,7 +28,7 @@ from xfold import fastnn
 
 import os
 # Row-blocked trunk-pair conditioning LayerNorm + projection from this many (padded) tokens (inputs up to 4500 tokens unchanged); env overrides for experiments.
-ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
+ROWS_MIN_TOKENS = int(os.environ.get("AF3T_ATOMCOND_MIN_TOKENS", os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608")))
 ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
 
 

@@ -28,7 +28,7 @@ SIGMA_DATA = 16.0
 
 
 import os
-MEM_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))   # prime_static's no-clone statics / trunk-pair park from this many (padded) tokens
+MEM_MIN_TOKENS = int(os.environ.get("AF3T_PRIME_MIN_TOKENS", os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608")))   # prime_static's no-clone statics / trunk-pair park from this many (padded) tokens
 
 class FourierEmbeddings(nn.Module):
     """cos(2*pi*(x*w+b)).  AF3 layout: w,b are the fixed constants of noise_level_embeddings.py;

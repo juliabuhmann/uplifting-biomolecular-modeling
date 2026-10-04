@@ -25,7 +25,7 @@ from xfold import of3
 
 import os
 # Row-blocked precompute_pair_logits from this many (padded) tokens (above the 4544 bucket: inputs up to 4500 tokens unchanged); env overrides for experiments.
-ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
+ROWS_MIN_TOKENS = int(os.environ.get("AF3T_DITROWS_MIN_TOKENS", os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608")))
 ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
 
 class AdaptiveLayerNorm(nn.Module):

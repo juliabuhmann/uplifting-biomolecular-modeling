@@ -1165,7 +1165,7 @@ def _imp(name, refusal_row, fallback):
 
 from . import _pystack as _PS                                    # noqa: E402  (padded_call / import_padded: one-off host work off the stack-chunk boundary)
 
-INPLACE_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))   # row v4 (B = 1, bf16, residual): K3 writes z + update into z itself from this many tokens (saves one [N, N, C] output)
+INPLACE_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608")) if os.environ.get("AF3T_TRIMUL_INPLACE", "1") != "0" else 1 << 30  # row v4 (B = 1, bf16, residual): K3 writes z + update into z itself from this many tokens (saves one [N, N, C] output)
 _RESOLVED = {}                                                  # (name, core_name) -> the module resolved once per process (the resolution below stats files: ~0.5 ms a call otherwise)
 
 
