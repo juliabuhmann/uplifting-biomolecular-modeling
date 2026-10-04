@@ -68,3 +68,36 @@ class TriangleMultiplication(nn.Module):
         pair *= torch.sigmoid(gate_out)
 
         return pair
+
+    def forward_chunked(self, pair: torch.Tensor, mask: torch.Tensor, channels: int = 16, block_gib: float = 2.0) -> torch.Tensor:
+        """forward() with bounded transients for large inputs: the gated projections and the contraction per block of `channels` output
+        channels (channels are independent until the center LayerNorm), written into one [C, N, N] product; then the center LayerNorm, output
+        projection and output gate per block of rows. Same statements, so the same values up to the GEMMs' sizes per block."""
+        n, c = pair.shape[0], self.c_pair
+        x = self.left_norm_input(pair)
+        prod = None
+        for c0 in range(0, c, channels):
+            c1 = min(c, c0 + channels)
+            idx = torch.arange(2 * c0, 2 * c1, device=pair.device)        # forward()'s reshape(c, 2, ...): output channel 2k -> a_k, 2k + 1 -> b_k
+            projection = torch.nn.functional.linear(x, self.projection.weight[idx]).permute(2, 0, 1)
+            if mask is not None:
+                projection *= mask[None, ...]
+            projection *= torch.sigmoid(torch.nn.functional.linear(x, self.gate.weight[idx]).permute(2, 0, 1))
+            projection = projection.reshape(c1 - c0, 2, n, n)
+            blk = torch.einsum(self.equation, projection[:, 0], projection[:, 1])
+            del projection
+            if prod is None:
+                prod = torch.empty((c, n, n), dtype=blk.dtype, device=blk.device)
+            prod[c0:c1] = blk
+            del blk
+        rows = max(64, min(n, int(block_gib * 2 ** 30 // (n * c * 4 * 4)) // 64 * 64))
+        out = None
+        for r0 in range(0, n, rows):
+            r1 = min(n, r0 + rows)
+            t = self.output_projection(self.center_norm(prod[:, r0:r1].permute(1, 2, 0).contiguous()))
+            t *= torch.sigmoid(self.gating_linear(x[r0:r1]))
+            if out is None:
+                out = torch.empty((n, n, t.shape[-1]), dtype=t.dtype, device=t.device)
+            out[r0:r1] = t
+            del t
+        return out

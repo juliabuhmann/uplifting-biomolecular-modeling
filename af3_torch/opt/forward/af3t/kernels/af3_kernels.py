@@ -234,6 +234,16 @@ def _trimul_select(lever, word, N, C, direction, prec="bf16"):
     return sel
 
 
+def _trimul_orig(lever, self, pair, mask):
+    """The module's own TriangleMultiplication statement (a by-name step-aside of the provider): from _MEMCHUNK['min_tokens'] the module's
+    forward_chunked (the same statements with bounded transients: channel-chunked contraction, row-blocked output stage) instead of the
+    whole-tensor forward (~10 pair-sized transients; at c 64 and 6080 tokens the template stack's 44 GiB)."""
+    if pair.dim() == 3 and int(pair.shape[0]) >= _MEMCHUNK["min_tokens"] and hasattr(self, "forward_chunked"):
+        _count(lever, "stock_chunked")
+        return self.forward_chunked(pair, mask)
+    return _ORIG["trimul"](self, pair, mask)
+
+
 def _trimul_serve(lever, word, self, pair, mask, residual=False):
     """TriangleMultiplication.forward through the provider under `word`, the census on `lever` (at the template stack's c = 64 under lever trimul: on tmpl_trimul).
     residual=True (the kit's PairformerBlock statement under lever resid_fold, _pairformer_forward): returns pair + update with the add folded into the serving row's
@@ -242,22 +252,22 @@ def _trimul_serve(lever, word, self, pair, mask, residual=False):
     the module contract, the update alone."""
     # _ORIG["trimul"]: the module's own statement (xfold's forward; package lever tri_layout's restatement of it where that lever is on) -- read per call, by name
     if lever in _DEAD:
-        return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
     TPm = _TRIMUL_PROV["mod"]
     if TPm is None:
-        _fallback(lever, "no-provider"); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        _fallback(lever, "no-provider"); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
     if not pair.is_cuda or pair.dim() != 3:
-        _fallback(lever, "cpu-or-batched"); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        _fallback(lever, "cpu-or-batched"); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
     N, C = int(pair.shape[-2]), int(pair.shape[-1])
     widths = (64, 128, 256) if (lever == "trimul_exact" or "tmpl_trimul" in _ON) else (128, 256)   # c 64 = the template pair stack: lever tmpl_trimul beside trimul, or the exact word (vouched at both widths)
     if C != self.c_pair or C not in widths:
-        _fallback(lever, "c=%d" % C); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        _fallback(lever, "c=%d" % C); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
     if not (_autocast_bf16() or pair.dtype == torch.bfloat16):
-        _fallback(lever, "no-bf16-autocast"); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        _fallback(lever, "no-bf16-autocast"); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
     if abs(self.left_norm_input.eps - self.center_norm.eps) > 0:
-        _fallback(lever, "eps-mismatch"); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        _fallback(lever, "eps-mismatch"); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
     if mask is not None and (mask.dim() != 2 or tuple(mask.shape) != (N, N)):
-        _fallback(lever, "mask-shape"); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        _fallback(lever, "mask-shape"); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
     lever_c = "tmpl_trimul" if (C == 64 and lever == "trimul") else lever      # the census name at this width
     try:
         z = pair if pair.is_contiguous() else pair.contiguous()
@@ -268,9 +278,9 @@ def _trimul_serve(lever, word, self, pair, mask, residual=False):
         prec = "bf16" if z.dtype == torch.bfloat16 else "f32z_bf16"          # an fp32 pair here is inside the bf16 autocast region (the confidence head's pair stream): the provider's f32z cells
         sel = _trimul_select(lever_c, word, N, C, direction, prec)             # the provider's row for (word, N, C, direction, prec) on this stack; None: refused by name
         if sel is None:
-            _fallback(lever_c, "unvouched" if word == "exact" else "refused"); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+            _fallback(lever_c, "unvouched" if word == "exact" else "refused"); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
         if sel.row in TPm.STOCK_ROWS:                                          # the cell names a library / torch statement of the op: this module's OWN statement serves, by name
-            _fallback(lever_c, "stock_row:%s" % sel.row); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+            _fallback(lever_c, "stock_row:%s" % sel.row); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
         w10, fcache = _trimul_wdict(self)
         try:
             out = TPm.triangle_multiplication(z, mask, direction=direction, weights=w10, selection=sel, residual=bool(residual), cache=fcache, eps=self.left_norm_input.eps)
@@ -278,7 +288,7 @@ def _trimul_serve(lever, word, self, pair, mask, residual=False):
             fcache.pop("_z_cast", None)                                        # (the face's cast memo is call-scoped here, as below)
             _TRIMUL_PROV["refused"] = "%s:%s" % (r.row or sel.row, str(r.kind).split("(")[0]); _TRIMUL_PROV["sel"][(word, N, C, direction, prec)] = None
             _count(lever_c, "refused:%s:%s" % (r.row or sel.row, str(r.kind).split("(")[0]))
-            _fallback(lever_c, "unvouched" if word == "exact" else "refused"); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+            _fallback(lever_c, "unvouched" if word == "exact" else "refused"); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
         if fcache.pop("_z_cast", None) is not None:                            # the face's per-call cast memo (compute_input: an fp32-resident pair's bf16 copy, made once per call for rows that read bf16)
             _count(lever_c, "z_cast_released")                                 # is CALL-scoped here: released now, so the confidence head's 8 modules never hold 8 x [N,N,c] bf16 copies (and their fp32
                                                                                # sources) across samples and items (2.82 GB resident at 1216 tokens, 26 GB at 3584, measured); numerics unchanged
@@ -296,7 +306,7 @@ def _trimul_serve(lever, word, self, pair, mask, residual=False):
         return out
     except Exception as e:
         if is_oom(e) or _capturing(): raise                                    # OOM propagates; no fallback applied (opt_core.oom.is_oom); under a CUDA-graph capture the error is the capture's (_capturing)
-        _kernel_error(lever, e); return _plus(pair, _ORIG["trimul"](self, pair, mask), residual)
+        _kernel_error(lever, e); return _plus(pair, _trimul_orig(lever, self, pair, mask), residual)
 
 
 def _trimul_forward(self, pair, mask, residual=False):

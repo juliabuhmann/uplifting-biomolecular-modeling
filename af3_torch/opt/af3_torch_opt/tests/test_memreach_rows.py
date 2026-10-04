@@ -319,3 +319,18 @@ def test_template_dedupe_forward_equals_reference_sum(slot_values):
 def teardown_module(module):
     if MAXDIFF:
         print("\n[memreach] max abs diffs:\n" + "\n".join(f"  {k}: {v:.3e}" for k, v in MAXDIFF.items()))
+
+
+# 7. TriangleMultiplication.forward_chunked (the memory-light module statement af3_kernels._trimul_orig serves from _MEMCHUNK['min_tokens'])
+@pytest.mark.parametrize("c_pair", [64, 128])
+@pytest.mark.parametrize("outgoing", [True, False])
+def test_trimul_forward_chunked_equals_forward(c_pair, outgoing):
+    from xfold.nn import triangle_multiplication as tm
+    m = _randomise(tm.TriangleMultiplication(c_pair=c_pair, _outgoing=outgoing), seed=7)
+    g = torch.Generator().manual_seed(17)
+    pair = torch.randn(N, N, c_pair, generator=g)
+    mask = (torch.rand(N, N, generator=g) > 0.1).float()
+    with torch.no_grad():
+        ref = m(pair.clone(), mask)
+        got = m.forward_chunked(pair.clone(), mask, channels=16, block_gib=BLOCK_GIB)
+    _close(f"trimul_chunked_c{c_pair}_{'out' if outgoing else 'in'}", got, ref)
