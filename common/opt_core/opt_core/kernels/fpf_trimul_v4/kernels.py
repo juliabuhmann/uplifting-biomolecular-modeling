@@ -364,6 +364,37 @@ def resolve_cfg(cfg, C, D, has_bias):
     return _table.resolve_cfg(cfg, C, D, has_bias)
 
 
+import os as _os
+CHUNK_MIN_TOKENS = int(_os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))   # channel-chunked K1 + bmm (trimul_v4_forward) from this many tokens, B = 1, pointer K1 only
+CHUNK_CHANNELS = int(_os.environ.get("AF3T_TRIMUL_CHUNK_CHANNELS", "32"))      # channels per chunk (a multiple of the K1 cell's BN; else the whole D)
+_CHUNK_W = {}
+
+
+def _chunk_channels(z4, B, N, Np, D, k1, k3):
+    """Channels per K1 + bmm chunk for this call, or 0 (the whole-D launch set)."""
+    dc = CHUNK_CHANNELS
+    if B != 1 or N < CHUNK_MIN_TOKENS or dc <= 0 or dc >= D or D % dc or dc % int(k1.get("BN", 32)):
+        return 0
+    if k1.get("impl", "ptr") in DESC_IMPLS or _kdesc.serves(z4, Np, k1, k3 or {})[0]:
+        return 0
+    return dc
+
+
+def _chunk_weights(w, c0, dc, D):
+    """The K1 operands of channels [c0, c0 + dc) of both projections (a-gate/proj columns c0.., b-columns D + c0..), memoised per weight pack."""
+    key = (w["wgT_in"].data_ptr(), c0, dc)
+    hit = _CHUNK_W.get(key)
+    if hit is None:
+        cols = torch.cat([torch.arange(c0, c0 + dc), torch.arange(D + c0, D + c0 + dc)]).to(w["wgT_in"].device)
+        hit = dict(w)
+        hit["wgT_in"] = w["wgT_in"][:, cols].contiguous()
+        hit["wpT_in"] = w["wpT_in"][:, cols].contiguous()
+        if w.get("has_bias"):
+            hit["bg_in"] = w["bg_in"][cols].contiguous(); hit["bp_in"] = w["bp_in"][cols].contiguous()
+        _CHUNK_W[key] = hit
+    return hit
+
+
 def trimul_v4_forward(z, outgoing, mask, w, cfg, eps=1e-5, residual=True, stock_round=True, out=None, pad=PAD):
     """z: [N, N, C] or [B, N, N, C] contiguous, bf16 (or fp32: pointer-load K1, fp32 out); mask: None, [N, N] / [1, N, N] (one mask for every b) or [B, N, N] (float/bool);
     w = pack_generic(...) with w['C'] == C.  pad: plane leading extent Np = ceil_pad(N); must be a multiple of 8 (16-byte bf16 rows for cuBLAS); 16 = bytes (the module-signature
@@ -383,7 +414,7 @@ def trimul_v4_forward(z, outgoing, mask, w, cfg, eps=1e-5, residual=True, stock_
         raise BatchLimit(lim, "B = %d, N = %d, k1 = %s" % (B, N, k1.get("impl", "ptr")))
     dev = z.device
     Np = ceil_to(N, pad)
-    ab = torch.empty((2, B, D, Np, Np), dtype=torch.bfloat16, device=dev)
+    ab = None if _chunk_channels(z4, B, N, Np, D, k1, k3) else torch.empty((2, B, D, Np, Np), dtype=torch.bfloat16, device=dev)
     x = torch.empty((B, D, Np, Np), dtype=torch.bfloat16, device=dev)
     m, layout = None, MASK_PER_B
     if mask is not None:
@@ -395,8 +426,19 @@ def trimul_v4_forward(z, outgoing, mask, w, cfg, eps=1e-5, residual=True, stock_
             m = m.reshape(N, N).contiguous(); layout = MASK_SHARED
         else:
             m = m.reshape(B, N, N).contiguous()
-    planes_t = launch_k1(z4, w, m, ab, N, Np, k1, eps, layout, outgoing, k3)
-    launch_bmm(ab, x, outgoing, planes_t)
+    dc = _chunk_channels(z4, B, N, Np, D, k1, k3)
+    if dc:                                                     # channel-chunked K1 + bmm (large N): a / b planes of dc channels at a time, each contracted straight into its
+        del ab                                                 # slice of x -- channels are independent until K3's output LayerNorm, which reads the whole x
+        for c0 in range(0, D, dc):
+            abc = torch.empty((2, B, dc, Np, Np), dtype=torch.bfloat16, device=dev)
+            pt = launch_k1(z4, _chunk_weights(w, c0, dc, D), m, abc, N, Np, k1, eps, layout, outgoing, k3)
+            launch_bmm(abc, x[:, c0:c0 + dc], outgoing, pt)
+            del abc
+        ab = None
+    else:
+        planes_t = launch_k1(z4, w, m, ab, N, Np, k1, eps, layout, outgoing, k3)
+        launch_bmm(ab, x, outgoing, planes_t)
+    del ab                                                     # the projections' last reader was the bmm: their 2 x [B, D, Np, Np] go back to the allocator (stream-ordered) before K3's output
     if out is None:
         out = torch.empty_like(z4)
     else:
