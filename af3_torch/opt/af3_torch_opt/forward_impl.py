@@ -30,6 +30,30 @@ def _reset_item_state(model, torch):
         K.clear_caches()
     return had_graph
 
+def _memdebug(torch, where, min_gib=0.5):
+    """AF3T_MEMDEBUG=1: every live CUDA tensor of at least min_gib, with the types (and dict keys / frame names) of what refers to it, two levels up."""
+    import gc
+    gc.collect()
+    print(f"[memdebug] {where}: allocated {torch.cuda.memory_allocated() / 2**30:.2f} GiB", flush=True)
+    def name(o):
+        if isinstance(o, dict):
+            return "dict(keys=%s)" % ",".join(map(str, list(o.keys())[:8]))
+        if type(o).__name__ == "frame":
+            return "frame(%s:%s)" % (o.f_code.co_filename.rsplit("/", 1)[-1], o.f_code.co_name)
+        return type(o).__name__
+    for t in gc.get_objects():
+        try:
+            if not (torch.is_tensor(t) and t.is_cuda and t.untyped_storage().nbytes() >= min_gib * 2**30):
+                continue
+        except Exception:
+            continue
+        refs = [r for r in gc.get_referrers(t) if not isinstance(r, list) or len(r) < 1000]
+        up = []
+        for r in refs[:4]:
+            up.append(name(r) + " <- " + "|".join(name(rr) for rr in gc.get_referrers(r)[:4]))
+        print(f"[memdebug]   {tuple(t.shape)} {t.dtype} {t.untyped_storage().nbytes() / 2**30:.2f} GiB  refs: {' ;; '.join(up)}", flush=True)
+
+
 HEAD_PARK_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))   # head_park from this many (padded) tokens (as the chunked pair statements)
 
 
@@ -90,7 +114,11 @@ def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, p
     t_sampled = _clock(torch)                                                 # sampler done (big's diff_free eviction below is in no phase)
     if diff_free:                                                             # big's diff_free: the diffusion statics (hoist caches, a whole-step graph, the mask-term cache) released
         freed_graph = _reset_item_state(model, torch)                         # before the heads, then the allocator's cached blocks returned; frees only, the heads read none of it
+        import gc                                                             # the statics can sit in reference cycles (the sampler's compiled-step frames): collected here, so their
+        gc.collect()                                                          # release does not wait for the interpreter's own collection (6045 tokens: 35 GiB still live in the heads)
         torch.cuda.synchronize(); torch.cuda.empty_cache()
+        if os.environ.get("AF3T_MEMDEBUG"):
+            _memdebug(torch, "after_diff_free")
         if item is not None:
             item["diff_free"] = 1; item["diff_freed"] = {"step_graph": freed_graph}
     if parked:
