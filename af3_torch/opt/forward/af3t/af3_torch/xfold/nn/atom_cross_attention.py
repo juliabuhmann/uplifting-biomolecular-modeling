@@ -26,13 +26,13 @@ from xfold.nn.diffusion_transformer import DiffusionCrossAttTransformer
 from xfold import fastnn
 
 
-@dataclasses.dataclass(frozen=True)
-
 import os
 # Row-blocked trunk-pair conditioning LayerNorm + projection from this many (padded) tokens (inputs up to 4500 tokens unchanged); env overrides for experiments.
 ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
 ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
 
+
+@dataclasses.dataclass(frozen=True)
 class AtomCrossAttEncoderOutput:
     token_act: torch.Tensor  # (num_tokens, ch)
     skip_connection: torch.Tensor  # (num_subsets, num_queries, ch)

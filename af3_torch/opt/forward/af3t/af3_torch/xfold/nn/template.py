@@ -22,13 +22,13 @@ from xfold.nn import pairformer
 
 from xfold import fastnn
 
-@dataclass
-
 import os
 # Row-blocked SingleTemplateEmbedding.construct_input from this many (padded) tokens (inputs up to 4500 tokens unchanged); env overrides for experiments.
 ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
 ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
 
+
+@dataclass
 class DistogramFeaturesConfig:
     # The left edge of the first bin.
     min_bin: float = 3.25
