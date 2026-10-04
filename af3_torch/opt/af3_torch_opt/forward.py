@@ -685,7 +685,8 @@ def run(a, tp=None):
             torch.cuda.synchronize(); t0 = time.time()
             with A.inference():
                 result = _forward_samples(A, model, batch, seed, torch, diff_free=bool(big and "diff_free" in big_levers), item=it,
-                                          prev_free=bool(big and "prev_free" in big_levers), rpx=RPX)   # AF3 Model.__call__ over S = model.num_samples (not A.forward: sample 0 only)
+                                          prev_free=bool(big and "prev_free" in big_levers), rpx=RPX,
+                                          head_park=bool(big and "head_park" in big_levers))   # AF3 Model.__call__ over S = model.num_samples (not A.forward: sample 0 only)
             torch.cuda.synchronize(); it["forward_s"] = round(time.time() - t0, 3)
             if RPX is not None:                                           # every rank's peak (collective), then the ranks meet before the next item
                 pk = max([torch.cuda.max_memory_allocated() / 2**30] + [v["peak_gb"] for v in (it.get("phases") or {}).values()])
@@ -755,6 +756,7 @@ def run(a, tp=None):
                 big["items"] += 1
                 big["diff_free_calls"] += int(it.get("diff_free") or 0)
                 big["prev_free_calls"] += int(it.get("prev_free") or 0)
+                big["head_park_calls"] = big.get("head_park_calls", 0) + int(it.get("head_park") or 0)
                 if big.get("paircond_rows") and RPX is None:                # paircond_chunk's census: blocks evaluated this item (1 = the input ran whole)
                     blocks = int(getattr(model.diffusion_head, "_paircond_blocks", 0) or 0)
                     it["paircond_blocks"] = blocks; big["paircond_blocks"] += blocks; big["paircond_items"] += int(blocks > 1)

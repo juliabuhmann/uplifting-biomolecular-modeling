@@ -29,6 +29,10 @@ the LEVER lines record it):
 Every lever prints one ``[af3-torch-opt] LEVER name=F7.<lever> state=on|off|skipped …`` line per pred with the model process's own
 record as evidence (``report.lever_line``); ``opt_core.mem`` absent from the imported core is a refusal of the mode by name.
 
+``head_park`` (size-gated, from ``forward_impl.HEAD_PARK_MIN_TOKENS`` padded tokens): the distogram head runs before the confidence heads and the
+fp32 trunk pair ``[N, N, 128]`` is then parked in pinned host memory; each sample's confidence head copies it to the device once
+(``xfold ConfidenceHead._forward_rows``, the row-blocked head of the same size gate). Class: frees only -- the same values.
+
 ``paircond_chunk``: the sampler's step-invariant pair conditioning (``DiffusionHead._pair_conditioning``: the relative-encoding one-hots, the
 [N, N, 267] concat, LayerNorm, projection and two transitions — about 5 kB of transients per token pair when whole, the statement that runs out
 of memory first as inputs grow) evaluated per block of ``PAIRCOND_CHUNK_ROWS`` rows into one preallocated result (``xfold/nn/paircond_rows.py``;
@@ -39,7 +43,7 @@ from __future__ import annotations
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 BASE_SET = "fastest"                     # the kit lever set big recomposes (modes.MODE_SETS['big'])
-LEVER_ORDER: Tuple[str, ...] = ("graph_drop", "diff_free", "expandable_segments", "prev_free", "paircond_chunk")
+LEVER_ORDER: Tuple[str, ...] = ("graph_drop", "diff_free", "expandable_segments", "prev_free", "paircond_chunk", "head_park")
 PAIRCOND_CHUNK_ROWS = 256                # paircond_chunk: rows of the token grid per block of the sampler's step-invariant pair conditioning (an input at or
                                          # below it runs whole, as stock); the block's transients are rows x N x ~5 kB
 DROP: Dict[str, Tuple[str, ...]] = {"stepgraph": ("hoist",)}     # kit graph lever graph_drop switches off (per item, size-gated) -> the non-graph part it keeps
@@ -154,6 +158,9 @@ def lever_state(lever: str, rep: Mapping) -> Tuple[str, Optional[str], dict]:
                 return "skipped", "no_item_completed_its_trunk", {}
             return "skipped", "no_release_recorded(forward.json:big.prev_free_calls)", {}
         return "on", None, {"calls": n}
+    if lever == "head_park":
+        # size-gated (forward_impl.HEAD_PARK_MIN_TOKENS): 0 calls = no item of this pred reached the gate, the lever's decision below it
+        return "on", None, {"calls": int(rec.get("head_park_calls") or 0), "items": rec.get("items", 0)}
     if lever == "expandable_segments":
         a = rec.get("alloc") or {}
         if a.get("effective") is not True:

@@ -26,6 +26,10 @@ from xfold.nn import fourier_constants
 SIGMA_DATA = 16.0
 
 
+
+import os
+MEM_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))   # prime_static's no-clone statics / trunk-pair park from this many (padded) tokens
+
 class FourierEmbeddings(nn.Module):
     """cos(2*pi*(x*w+b)).  AF3 layout: w,b are the fixed constants of noise_level_embeddings.py;
     OF3 layout: w,b are parameters (diffusion_head/fourier_embedding_weight|bias) loaded by the converter."""
@@ -363,6 +367,12 @@ class DiffusionHead(nn.Module):
         st = getattr(self, "_static", None) or {}
         new = {}
         new["pair_cond"] = self._pair_conditioning(batch, embeddings, use_conditioning)
+        if getattr(self, "park_trunk_pair", False) and int(new["pair_cond"].shape[0]) >= MEM_MIN_TOKENS and embeddings["pair"].is_cuda:
+            p = embeddings["pair"]                                   # big's head_park: past the conditioning nothing of the sampler reads the fp32 trunk pair (the step reads
+            host = torch.empty(p.shape, dtype=p.dtype, pin_memory=True)   # the statics) -- it goes to pinned host memory for the rest of the sampler and the heads (the
+            host.copy_(p)                                            # caller's dict is updated in place), before the per-block pair logits are laid
+            embeddings["pair"] = host
+            del p, host
         new["pair_logits"] = self.transformer.precompute_pair_logits(new["pair_cond"])
         if getattr(self, "fold_key_mask_into_pair_logits", False):   # the fused token transformer's attention row reads the key mask from the bias (forward.swap_in_dtk sets
             km = batch.token_features.mask                           # this): the masked keys' logits := -1e9 here, once per trajectory -- every consumer of the hoisted logits
@@ -390,8 +400,10 @@ class DiffusionHead(nn.Module):
                 if torch.is_tensor(v): st[k].copy_(v)
                 else: st[k] = v                                      # plain values (the window path's row count) are the new trajectory's
         else:
-            for k, v in new.items():
-                st[k] = v.clone() if torch.is_tensor(v) else v
+            big_n = int(new["pair_cond"].shape[0]) >= MEM_MIN_TOKENS
+            for k, v in new.items():                                 # from MEM_MIN_TOKENS the two pair-sized statics are kept as computed (fresh tensors: torch.stack /
+                fresh = big_n and k in ("pair_cond", "pair_logits")  # the conditioning's own result) instead of cloned -- no second [24, 16, N, N] copy at the peak
+                st[k] = (v if fresh else v.clone()) if torch.is_tensor(v) else v
             st.pop("graph", None)
         st["primed"] = True
         self._static = st

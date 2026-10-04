@@ -30,7 +30,10 @@ def _reset_item_state(model, torch):
         K.clear_caches()
     return had_graph
 
-def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, prev_free=False, rpx=None):
+HEAD_PARK_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))   # head_park from this many (padded) tokens (as the chunked pair statements)
+
+
+def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, prev_free=False, rpx=None, head_park=False):
     """AF3 ``Model.__call__``'s composition over ``S = model.num_samples`` diffusion samples, from the kit's own public steps: the trunk once,
     the sampler once (S samples, the torch RNG seeded), the confidence head ONCE PER SAMPLE (stacked to a leading sample axis [S, ...]),
     the distogram once. The kit's own ``forward`` runs the confidence head on sample 0 only (``af3_torch_api.py:219-226``, "1 diffusion
@@ -67,6 +70,12 @@ def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, p
                 mb, n_geo, n_mod = K.release_face_workspaces(model)
                 if item is not None:                                          # on the ITEM line as diff_freed_trimul_mib= and in forward.json
                     item["diff_freed_trimul_mib"] = round(mb, 1); item["diff_freed_trimul"] = {"geometries": n_geo, "modules": n_mod}
+    if rpx is None:
+        dg = None                                                             # (n_gpu > 1 computed the distogram after the trunk above)
+    parked = rpx is None and head_park and int(emb["pair"].shape[0]) >= HEAD_PARK_MIN_TOKENS
+    if parked:                                                                # big's head_park: the distogram head (a pure function of the trunk pair) runs now, so that the
+        dg = A.run_distogram(model, batch, emb)                               # trunk pair can live in pinned host memory from the sampler's priming on (DiffusionHead.prime_static
+        model.diffusion_head.park_trunk_pair = True                           # parks it once the statics are computed; the confidence heads copy it back per sample)
     t_sampler = _clock(torch)                                                 # trunk done; sampler = A.run_diffusion's span (every step of every sample)
     if rpx is None:
         xyz = A.run_diffusion(model, batch, emb, seed=seed)                   # [S, N, 24, 3]
@@ -84,6 +93,15 @@ def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, p
         torch.cuda.synchronize(); torch.cuda.empty_cache()
         if item is not None:
             item["diff_free"] = 1; item["diff_freed"] = {"step_graph": freed_graph}
+    if parked:
+        model.diffusion_head.park_trunk_pair = False
+        if emb["pair"].is_cuda:                                               # not parked by the priming (no hoist): park it now, before the heads
+            host = torch.empty(emb["pair"].shape, dtype=emb["pair"].dtype, pin_memory=True)
+            host.copy_(emb["pair"])
+            emb = dict(emb, pair=host); del host
+        torch.cuda.synchronize(); torch.cuda.empty_cache()
+        if item is not None:
+            item["head_park"] = 1
     t_conf = _clock(torch)                                                    # conf = the confidence head over every sample (A.run_confidence once per sample), summed; the distogram head after it is in no phase
     if rpx is None:
         confs = [A.run_confidence(model, batch, emb, xyz[s]) for s in range(int(xyz.shape[0]))]
@@ -97,7 +115,8 @@ def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, p
     if item is not None:                                                      # the item's phase walls (s), one record per (input, seed) on every arm and rank: report.PHASES / the PHASE line
         item["phase_s"] = {"lm": None, "trunk": round(t_sampler - t_trunk, 3), "sampler": round(t_sampled - t_sampler, 3), "conf": round(t_heads - t_conf, 3)}
     if rpx is None:
-        dg = A.run_distogram(model, batch, emb)
+        if dg is None:
+            dg = A.run_distogram(model, batch, emb)
         _census(torch, phases, "heads", t_wall)
         if phases:
             print("[forward] STAGES " + " ".join(f"{k}:peak={v['peak_gb']}GB,wall={v['wall_s']}s" for k, v in phases.items()), flush=True)

@@ -23,6 +23,26 @@ from xfold import fastnn
 _CONTACT_THRESHOLD = 8.0
 _CONTACT_EPSILON = 1e-3
 
+import os
+# Row-blocked confidence head (ConfidenceHead._forward_rows) from this many (padded) tokens: above the 4544 bucket, so inputs up to 4500 tokens
+# run forward() unchanged; ROWS_BLOCK_GIB = the transient budget per row block. Env overrides are for experiments.
+ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
+ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
+
+
+def _block_rows(n, bytes_per_row):
+    r = int(ROWS_BLOCK_GIB * 2 ** 30 // max(1, bytes_per_row)) // 64 * 64
+    return max(64, min(n, r))
+
+
+def _tm_term(num_interface_tokens, bin_centers, pae_probs):
+    """get_tmscore_adjusted_pae (ConfidenceHead._get_tmscore_adjusted_pae) on a row block."""
+    clipped_num_res = torch.clamp(num_interface_tokens, min=19)
+    d0 = 1.24 * (clipped_num_res - 15) ** (1.0 / 3) - 1.8
+    d0 = d0[:, :, None]
+    tm_per_bin = 1.0 / (1 + torch.square(bin_centers[None, None, :]) / torch.square(d0))
+    return torch.sum(pae_probs * tm_per_bin, dim=-1)
+
 
 class DistogramHead(nn.Module):
     def __init__(self,
@@ -72,6 +92,27 @@ class DistogramHead(nn.Module):
         pair_act = embeddings['pair']
         seq_mask = batch.token_features.mask.to(dtype=torch.bool)
         pair_mask = seq_mask[:, None] * seq_mask[None, :]
+
+        n = pair_act.shape[0]
+        if n >= ROWS_MIN_TOKENS:                                    # the same statements per block of rows (the symmetrisation reads the whole half logits)
+            rows = _block_rows(n, n * self.num_bins * 4 * 3)
+            half = None
+            for r0 in range(0, n, rows):
+                blk = self.half_logits(pair_act[r0:r0 + rows])
+                if half is None:
+                    half = torch.empty((n, n, blk.shape[-1]), dtype=blk.dtype, device=blk.device)
+                half[r0:r0 + rows] = blk
+                del blk
+            contact_probs = None
+            for r0 in range(0, n, rows):
+                logits = half[r0:r0 + rows] + half[:, r0:r0 + rows].transpose(-2, -3)
+                probs = torch.softmax(logits, dim=-1)
+                blk = torch.einsum('ijk,k->ij', probs, self.is_contact_bin)
+                if contact_probs is None:
+                    contact_probs = torch.empty((n, n), dtype=blk.dtype, device=blk.device)
+                contact_probs[r0:r0 + rows] = pair_mask[r0:r0 + rows] * blk
+                del logits, probs, blk
+            return {'bin_edges': self.breaks, 'contact_probs': contact_probs}
 
         left_half_logits = self.half_logits(pair_act)
         right_half_logits = left_half_logits
@@ -213,6 +254,8 @@ class ConfidenceHead(nn.Module):
         """
 
         dtype = dense_atom_positions.dtype
+        if seq_mask.shape[0] >= ROWS_MIN_TOKENS:
+            return self._forward_rows(dense_atom_positions, embeddings, seq_mask, token_atoms_to_pseudo_beta, asym_id)
 
         seq_mask_cast = seq_mask.to(dtype=dtype)
         pair_mask = seq_mask_cast[:, None] * seq_mask_cast[None, :]
@@ -300,6 +343,101 @@ class ConfidenceHead(nn.Module):
             'full_pde': pred_distance_error,
             'average_pde': average_pred_distance_error,
             **pae_outputs,
+        }
+
+    def _forward_rows(self, dense_atom_positions, embeddings, seq_mask, token_atoms_to_pseudo_beta, asym_id):
+        """forward() for large inputs: the same statements with every [N, N, c] intermediate outside the pairformer stack formed per block of
+        rows (ROWS_BLOCK_GIB of transients per block) -- the feature embedding added into the pair in place, the PDE / PAE / TM-adjusted maps
+        written row block by row block. embeddings['pair'] may live on the host (the caller parks it there): it is copied to the device once.
+        Same values as forward() up to the GEMM leading size per block and the summation order of average_pde (tolerance class)."""
+        dtype = dense_atom_positions.dtype
+        dev = dense_atom_positions.device
+        N = seq_mask.shape[0]
+        seq_mask_cast = seq_mask.to(dtype=dtype)
+        pair_act = embeddings['pair'].to(device=dev, dtype=dtype, copy=True)
+        single_act = embeddings['single'].clone().to(dtype=dtype)
+        target_feat = embeddings['target_feat'].clone().to(dtype=dtype)
+        pair_mask = seq_mask_cast[:, None] * seq_mask_cast[None, :]                 # [N, N] (the pairformer's mask, as forward())
+        rows = _block_rows(N, N * self.c_pair * 4 * 3)
+
+        left = self.left_target_feat_project(target_feat)                            # out[i, j] = left[j] + right[i] (forward()'s broadcast)
+        right = self.right_target_feat_project(target_feat)
+        positions = atom_layout.convert(token_atoms_to_pseudo_beta, dense_atom_positions, layout_axes=(-3, -2))
+        cfg = self.dgram_features_config
+        lower = torch.square(torch.linspace(cfg.min_bin, cfg.max_bin, cfg.num_bins, device=dev))
+        upper = torch.concatenate([lower[1:], torch.ones(1, device=dev) * 1e8], dim=-1)
+        for r0 in range(0, N, rows):
+            r1 = min(N, r0 + rows)
+            dist2 = torch.sum(torch.square(positions[r0:r1, None, :] - positions[None, :, :]), dim=-1, keepdims=True)
+            dgram = (dist2 > lower).to(dtype=torch.float32) * (dist2 < upper).to(dtype=torch.float32)
+            dgram *= pair_mask[r0:r1, :, None]
+            out = left[None, :, :] + right[r0:r1, None, :]
+            out += self.distogram_feat_project(dgram)
+            pair_act[r0:r1] += out
+            del dist2, dgram, out
+
+        for layer in self.confidence_pairformer:
+            pair_act, single_act = layer(pair_act, pair_mask, single_act, seq_mask)
+
+        pair_mask_bool = pair_mask.to(dtype=torch.bool)
+        pde = torch.empty((N, N), dtype=torch.float32, device=dev)
+        pae = torch.empty((N, N), dtype=torch.float32, device=dev)
+        tmg = torch.empty((N, N), dtype=torch.float32, device=dev)
+        tmi = torch.empty((N, N), dtype=torch.float32, device=dev)
+        half = None
+        for r0 in range(0, N, rows):                                                  # left half distance logits, whole (the symmetrisation reads columns)
+            r1 = min(N, r0 + rows)
+            blk = self.left_half_distance_logits(self.logits_ln(pair_act[r0:r1]))
+            if half is None:
+                half = torch.empty((N, N, blk.shape[-1]), dtype=blk.dtype, device=dev)
+            half[r0:r1] = blk
+            del blk
+        for r0 in range(0, N, rows):
+            r1 = min(N, r0 + rows)
+            logits = half[r0:r1] + torch.transpose(half[:, r0:r1], -2, -3)
+            probs = torch.softmax(logits, dim=-1)
+            pde[r0:r1] = torch.sum(probs * self.bin_centers, dim=-1) * pair_mask[r0:r1]
+            del logits, probs
+        del half
+        average_pred_distance_error = torch.sum(pde, dim=[-2, -1]) / torch.sum(pair_mask, dim=[-2, -1])
+
+        x_all = asym_id[None, :] == asym_id[:, None]                                  # [N, N] bool (small); _get_tmscore_adjusted_pae's counts
+        num_chain_tokens = torch.sum(x_all * pair_mask_bool, dim=-1, dtype=torch.int32)
+        n_glob = seq_mask.sum()
+        for r0 in range(0, N, rows):
+            r1 = min(N, r0 + rows)
+            probs = torch.softmax(self.pae_logits(self.pae_logits_ln(pair_act[r0:r1])), dim=-1)
+            pmb = pair_mask_bool[r0:r1]
+            pae[r0:r1] = torch.sum(probs * self.pae_bin_centers, dim=-1) * pmb
+            nit = num_chain_tokens[None, :] + num_chain_tokens[r0:r1, None]
+            xs = x_all[r0:r1]
+            nit -= xs * (nit // 2)
+            nit = nit * pmb
+            ngt = torch.ones(size=pmb.shape, dtype=torch.int32, device=dev)
+            ngt *= n_glob
+            tmg[r0:r1] = _tm_term(ngt, self.pae_bin_centers, probs)
+            tmi[r0:r1] = _tm_term(nit, self.pae_bin_centers, probs)
+            del probs, nit, ngt
+        del pair_act
+
+        plddt_logits = self.plddt_logits(self.plddt_logits_ln(single_act))
+        plddt_logits = einops.rearrange(
+            plddt_logits, '... (n_atom n_bins) -> ... n_atom n_bins', n_bins=self.num_plddt_bins)
+        predicted_lddt = torch.sum(
+            torch.softmax(plddt_logits, dim=-1) * self.plddt_bin_centers, dim=-1) * 100.0
+        experimentally_resolved_logits = self.experimentally_resolved_logits(
+            self.experimentally_resolved_ln(single_act))
+        experimentally_resolved_logits = einops.rearrange(
+            experimentally_resolved_logits, '... (n_atom n_bins) -> ... n_atom n_bins', n_bins=2)
+        predicted_experimentally_resolved = torch.softmax(experimentally_resolved_logits, dim=-1)[..., 1]
+        return {
+            'predicted_lddt': predicted_lddt,
+            'predicted_experimentally_resolved': predicted_experimentally_resolved,
+            'full_pde': pde,
+            'average_pde': average_pred_distance_error,
+            'full_pae': pae,
+            'tmscore_adjusted_pae_global': tmg,
+            'tmscore_adjusted_pae_interface': tmi,
         }
 
     def _get_tmscore_adjusted_pae(self,
