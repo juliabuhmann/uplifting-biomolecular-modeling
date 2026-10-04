@@ -22,6 +22,12 @@ from xfold.nn import atom_cross_attention
 from xfold.nn import diffusion_head
 
 
+
+import os
+# Row-blocked relative encoding (Evoformer._relative_encoding) from this many (padded) tokens (inputs up to 4500 tokens unchanged); env overrides for experiments.
+REL_ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
+REL_ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
+
 class Evoformer(nn.Module):
     def __init__(self, msa_channel: int = 64):
         super(Evoformer, self).__init__()
@@ -75,6 +81,17 @@ class Evoformer(nn.Module):
     ) -> torch.Tensor:
         max_relative_idx = 32
         max_relative_chain = 2
+
+        n = int(pair_activations.shape[0])
+        if n >= REL_ROWS_MIN_TOKENS:                 # large inputs: the encoding (int64 one-hots [N, N, 66 | 66 | 6] + their concat: ~53 GiB at 5120) per block
+            from xfold.nn import paircond_rows       # of rows, each projected straight into its rows of the pair (paircond_rows.relative_encoding_rows:
+            rows = max(64, min(n, int(REL_ROWS_BLOCK_GIB * 2 ** 30 // (n * 139 * 4 * 2)) // 64 * 64))   # create_relative_encoding's rows exactly)
+            for r0 in range(0, n, rows):
+                r1 = min(n, r0 + rows)
+                rel = paircond_rows.relative_encoding_rows(batch.token_features, r0, r1, max_relative_idx, max_relative_chain, pair_activations.dtype)
+                pair_activations[r0:r1] += self.position_activations(rel)
+                del rel
+            return pair_activations
 
         rel_feat = featurization.create_relative_encoding(
             batch.token_features,

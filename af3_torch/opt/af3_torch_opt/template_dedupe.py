@@ -118,18 +118,24 @@ def forward(self, query_embedding, templates, padding_mask_2d, multichain_mask_2
         num_res, num_res, self.num_channels)
 
     reps = distinct_slots(templates, num_templates)
-    evaluated = {}
+    last_use = {r: i for i, r in enumerate(reps[:num_templates])}       # each distinct slot's embedding is released after its last slot's add (same adds, same order:
+    evaluated = {}                                                       # bitwise; one [N, N, c] embedding alive at a time instead of every distinct slot's)
+    n_eval = 0
     for template_idx in range(num_templates):
         r = reps[template_idx]
         if r not in evaluated:
             evaluated[r] = self.single_template_embedding(
                 query_embedding, templates[r], padding_mask_2d, multichain_mask_2d
             )
+            n_eval += 1
         template_embedding = evaluated[r]
 
         summed_template_embeddings += template_embedding
+        del template_embedding
+        if last_use[r] == template_idx:
+            del evaluated[r]
 
-    COUNTS["calls"] += 1; COUNTS["slots"] += int(num_templates); COUNTS["evaluated"] += len(evaluated)
+    COUNTS["calls"] += 1; COUNTS["slots"] += int(num_templates); COUNTS["evaluated"] += n_eval
 
     embedding = summed_template_embeddings / (1e-7 + num_templates)
 

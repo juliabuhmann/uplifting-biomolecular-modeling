@@ -23,6 +23,12 @@ from xfold.nn import pairformer
 from xfold import fastnn
 
 @dataclass
+
+import os
+# Row-blocked SingleTemplateEmbedding.construct_input from this many (padded) tokens (inputs up to 4500 tokens unchanged); env overrides for experiments.
+ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
+ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
+
 class DistogramFeaturesConfig:
     # The left edge of the first bin.
     min_bin: float = 3.25
@@ -330,6 +336,60 @@ class SingleTemplateEmbedding(nn.Module):
 
         return act
 
+    def construct_input_rows(self, query_embedding, templates: features.Templates, multichain_mask_2d) -> torch.Tensor:
+        """construct_input for large inputs: the per-token quantities once (the same statements), then every [N, N, c] feature map and its
+        projection per block of rows, summed straight into one [N, N, num_channels] result -- no whole-pair LayerNorm output, distogram or
+        one-hot broadcasts. Same values up to the projections' GEMM leading size per block."""
+        dtype = query_embedding.dtype
+        n = query_embedding.shape[0]
+        dense_atom_mask = templates.atom_mask
+        dense_atom_positions = templates.atom_positions
+        dense_atom_positions *= dense_atom_mask[..., None]
+        pb_pos, pb_mask = scoring.pseudo_beta_fn(templates.aatype, dense_atom_positions, dense_atom_mask)
+        aatype = template_restype_for_one_hot(templates.aatype, dense_atom_mask)
+        aatype = torch.nn.functional.one_hot(aatype.to(dtype=torch.int64), residue_names.POLYMER_TYPES_NUM_WITH_UNKNOWN_AND_GAP).to(dtype=dtype)
+        template_group_indices = torch.take_along_dim(
+            protein_data_processing.RESTYPE_RIGIDGROUP_DENSE_ATOM_IDX.to(device=templates.aatype.device),
+            templates.aatype.to(dtype=torch.int64)[..., None, None], dim=0)
+        rigid, backbone_mask = make_backbone_rigid(
+            geometry.Vec3Array.from_array(dense_atom_positions), dense_atom_mask, template_group_indices.to(dtype=torch.int32))
+        points = rigid.translation
+        rot, tr = rigid.rotation, rigid.translation
+        backbone_mask = backbone_mask.to(dtype=dtype)
+        cfg = self.dgram_features_config
+        lower = torch.square(torch.linspace(cfg.min_bin, cfg.max_bin, cfg.num_bins, device=pb_pos.device))
+        upper = torch.concatenate([lower[1:], torch.ones(1, device=lower.device) * 1e8], dim=-1)
+        rows = max(64, min(n, int(ROWS_BLOCK_GIB * 2 ** 30 // (n * 128 * 4 * 4)) // 64 * 64))
+        act = None
+        for r0 in range(0, n, rows):
+            r1 = min(n, r0 + rows)
+            mc = multichain_mask_2d[r0:r1]
+            pbm2 = pb_mask[r0:r1, None] * pb_mask[None, :]
+            pbm2 *= mc
+            dist2 = torch.sum(torch.square(pb_pos[r0:r1, None, :] - pb_pos[None, :, :]), dim=-1, keepdims=True)
+            dgram = (dist2 > lower).to(dtype=torch.float32) * (dist2 < upper).to(dtype=torch.float32)
+            dgram *= pbm2[..., None]
+            blk = self.template_pair_embedding_0(dgram.to(dtype=dtype)); del dgram, dist2
+            blk += self.template_pair_embedding_1(pbm2.to(dtype=dtype)[..., None])
+            blk += self.template_pair_embedding_2(aatype[None, :, :])
+            blk += self.template_pair_embedding_3(aatype[r0:r1, None, :])
+            rr = geometry.Rigid3Array(
+                geometry.Rot3Array(rot.xx[r0:r1, None], rot.xy[r0:r1, None], rot.xz[r0:r1, None], rot.yx[r0:r1, None], rot.yy[r0:r1, None],
+                                   rot.yz[r0:r1, None], rot.zx[r0:r1, None], rot.zy[r0:r1, None], rot.zz[r0:r1, None]),
+                geometry.Vec3Array(tr.x[r0:r1, None], tr.y[r0:r1, None], tr.z[r0:r1, None]))
+            uv = rr.inverse().apply_to_point(points).normalized()
+            bb2 = backbone_mask[r0:r1, None] * backbone_mask[None, :]
+            bb2 *= mc
+            for k, x in enumerate((uv.x, uv.y, uv.z)):
+                blk += getattr(self, f'template_pair_embedding_{4 + k}')((x.to(dtype=dtype) * bb2)[..., None])
+            blk += self.template_pair_embedding_7(bb2[..., None])
+            blk += self.template_pair_embedding_8(self.query_embedding_norm(query_embedding[r0:r1]))
+            if act is None:
+                act = torch.empty((n, n, blk.shape[-1]), dtype=blk.dtype, device=blk.device)
+            act[r0:r1] = blk
+            del blk, uv, bb2, pbm2, rr
+        return act
+
     def forward(
         self,
         query_embedding: torch.Tensor,
@@ -338,8 +398,11 @@ class SingleTemplateEmbedding(nn.Module):
         multichain_mask_2d: torch.Tensor
     ) -> torch.Tensor:
 
-        act = self.construct_input(
-            query_embedding, templates, multichain_mask_2d)
+        if query_embedding.shape[0] >= ROWS_MIN_TOKENS:
+            act = self.construct_input_rows(query_embedding, templates, multichain_mask_2d)
+        else:
+            act = self.construct_input(
+                query_embedding, templates, multichain_mask_2d)
 
         for pairformer_block in self.template_embedding_iteration:
             act = pairformer_block(act, pair_mask=padding_mask_2d)
