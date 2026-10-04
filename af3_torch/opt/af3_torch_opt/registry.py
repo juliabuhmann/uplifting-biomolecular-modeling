@@ -221,7 +221,7 @@ IMPL = {"bf16w": ("build_model.bf16w", "kit"), "trimul": ("opt_core.kernels.trim
         "compile": ("torch.compile", "kit"), "sbatch": ("alphafold3._sample_diffusion_batched", "kit"), "atom_window": ("atom_window", "core"), "token_agg": ("af3t_token_agg.token_mean_relu", "kit"), "atom_rows": ("diffusion_transformer.forward_windowed_rows", "kit"), "prologue": ("diffusion_head.augment_and_noise_batched", "kit"), "dtk": ("dtk_kernels", "core"), "template_dedupe": ("template_dedupe.forward", "kit"), "dev_scalars": ("dev_scalars.install", "kit"), "tri_layout": ("tri_layout.forward", "kit"), "ln_rows": ("ln_rows.forward", "kit"), "attn_layout": ("attn_layout._attention", "kit"), "gate_fuse": ("gate_fuse.gated_", "kit"), "castcache": ("castcache.install", "kit"), "canonical_noise": ("canonical_noise._sample_diffusion", "kit"), "prefetch": ("pipeline_stream.await_batch", "kit"), "write_behind": ("pipeline_stream.await_results", "kit"), "autotune_cache": ("triton.knobs.autotuning.cache", "kit"), "feat_par": ("pipeline_stream.merge_featurise_reports", "kit"),
         "graph_drop": ("big.build_levers", "kit"), "diff_free": ("forward._reset_item_state", "kit"),
         "expandable_segments": ("opt_core.mem.torch_alloc", "core"), "prev_free": ("forward_impl._run_trunk_prev_free", "kit"),
-        "paircond_chunk": ("paircond_rows.pair_conditioning_rows", "kit"),
+        "paircond_chunk": ("paircond_rows.pair_conditioning_rows", "kit"), "head_park": ("forward_impl._forward_samples", "kit"),
         "rowpair": ("opt_core.mem.rowpair", "core")}
 # The canonical cross-engine strategy id (the shared core's STRATEGIES.json) each lever is an instance of: the LEVER line's name=; the kit's own
 # lever name rides beside it as lever=.
@@ -231,7 +231,7 @@ STRATEGY = {"bf16w": "F4.bf16_weight_precast", "trimul": "F2.fpf_trimul_fast", "
             "compile": "F3.torch_compile", "sbatch": "LOCAL.af3_torch.sample_batch", "atom_window": "LOCAL.af3_torch.atom_window", "token_agg": "LOCAL.af3_torch.token_agg", "atom_rows": "LOCAL.af3_torch.atom_rows", "prologue": "LOCAL.af3_torch.batched_prologue", "dtk": "LOCAL.dit_fused_kernels", "template_dedupe": "LOCAL.af3_torch.template_distinct_slots", "dev_scalars": "F6.host_sync_elimination", "tri_layout": "F2.trimul_tperm_exact", "ln_rows": "LOCAL.af3_torch.ln_rows", "attn_layout": "LOCAL.af3_torch.attn_layout", "gate_fuse": "LOCAL.af3_torch.gate_fuse", "castcache": "LOCAL.af3_torch.castcache", "canonical_noise": "LOCAL.af3_torch.canonical_noise", "prefetch": "F6.item_ordering_prefetch", "write_behind": "F6.output_overlap", "autotune_cache": "F3.jit_cache_keyed", "feat_par": "F6.item_ordering_prefetch",
             "graph_drop": "F7.graph_pool_budget", "diff_free": "F7.chunked_eval",
             "expandable_segments": "F7.expandable_segments", "prev_free": "F7.chunked_eval",
-            "paircond_chunk": "F7.chunked_eval",
+            "paircond_chunk": "F7.chunked_eval", "head_park": "F7.chunked_eval",
             "rowpair": "F7.tensor_parallel"}
 
 PORT = {   # the port itself (what makes xfold @ 22bdeed run the OpenFold3 parameter layout): install-time in the kit's copy, not a switch
@@ -393,6 +393,7 @@ BIG_LEVERS = {
     "expandable_segments": {"family": "F7", "kind": "allocator", "class": "bitwise (placement only)", "name": "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True via opt_core.mem.torch_alloc (declared beside the step graph below graph_drop's gate)"},
     "prev_free": {"family": "F7", "kind": "setting", "class": "bitwise vs the mode without it (frees only)", "name": "the recycle's fp32 prev embeddings released once the Evoformer has embedded them"},
     "paircond_chunk": {"family": "F7", "kind": "setting", "class": "tolerance (per-pair arithmetic unchanged; GEMM leading size per block)", "name": "the sampler's step-invariant pair conditioning evaluated per block of big.PAIRCOND_CHUNK_ROWS rows into one preallocated result (xfold/nn/paircond_rows.py)"},
+    "head_park": {"family": "F7", "kind": "setting", "class": "bitwise vs the mode without it (moves only; size-gated)", "name": "from forward_impl.HEAD_PARK_MIN_TOKENS padded tokens: the distogram head first, then the fp32 trunk pair parked in pinned host memory from the sampler's conditioning on, each confidence head copying it back (xfold ConfidenceHead._forward_rows)"},
 }
 
 # The resource axis of `big`: `--n_gpu P` (served set modes.N_GPU_SUPPORTED = (1, 2, 4, 8)). P = 1 is the single-GPU composition;

@@ -421,6 +421,7 @@ ROWPAIR_GATES = (
     ("paircond_chunk", "skipped:rowpair_sampler"),        # the row-sharded roll-out computes the pair conditioning on each rank's rows itself (rowpair_xfold pair_cond_rows)
     ("diff_free", "composes"),
     ("expandable_segments", "composes"),
+    ("head_park", "subsumed:rowpair_ztrunk_park"),        # the row-sharded heads park the trunk shard on the host themselves (rowpair_xfold heads.ZTrunkPlan)
 )
 
 
