@@ -365,6 +365,7 @@ def resolve_cfg(cfg, C, D, has_bias):
 
 
 import os as _os
+import weakref as _weakref
 CHUNK_MIN_TOKENS = int(_os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))   # channel-chunked K1 + bmm (trimul_v4_forward) from this many tokens, B = 1, pointer K1 only
 CHUNK_CHANNELS = int(_os.environ.get("AF3T_TRIMUL_CHUNK_CHANNELS", "32"))      # channels per chunk (a multiple of the K1 cell's BN; else the whole D)
 _CHUNK_W = {}
@@ -381,9 +382,13 @@ def _chunk_channels(z4, B, N, Np, D, k1, k3):
 
 
 def _chunk_weights(w, c0, dc, D):
-    """The K1 operands of channels [c0, c0 + dc) of both projections (a-gate/proj columns c0.., b-columns D + c0..), memoised per weight pack."""
-    key = (w["wgT_in"].data_ptr(), c0, dc)
-    hit = _CHUNK_W.get(key)
+    """The K1 operands of channels [c0, c0 + dc) of both projections (a-gate/proj columns c0.., b-columns D + c0..), memoised per weight pack:
+    keyed by the pack's tensor identity and validated through a weak reference (a pack the provider evicted can be re-created at the same
+    address or id -- a data_ptr key served another module's weights), the entry dropped when the pack dies."""
+    src = w["wgT_in"]
+    key = (id(src), c0, dc)
+    ent = _CHUNK_W.get(key)
+    hit = ent[1] if ent is not None and ent[0]() is src else None
     if hit is None:
         cols = torch.cat([torch.arange(c0, c0 + dc), torch.arange(D + c0, D + c0 + dc)]).to(w["wgT_in"].device)
         hit = dict(w)
@@ -391,7 +396,7 @@ def _chunk_weights(w, c0, dc, D):
         hit["wpT_in"] = w["wpT_in"][:, cols].contiguous()
         if w.get("has_bias"):
             hit["bg_in"] = w["bg_in"][cols].contiguous(); hit["bp_in"] = w["bp_in"][cols].contiguous()
-        _CHUNK_W[key] = hit
+        _CHUNK_W[key] = (_weakref.ref(src, lambda _r, k=key: _CHUNK_W.pop(k, None)), hit)
     return hit
 
 

@@ -30,6 +30,38 @@ def _reset_item_state(model, torch):
         K.clear_caches()
     return had_graph
 
+def _headcheck(A, model, batch, emb, xyz0, torch):
+    """AF3T_HEADCHECK=1 (debug): the confidence head on one sample with each size-gated memory statement switched on alone, vs all off;
+    prints the max |diff| per output key. Restores the gates afterwards."""
+    import importlib
+    head = importlib.import_module("xfold.nn.head")
+    K = sys.modules.get("af3_kernels")
+    tms = [m for m in list(sys.modules.values()) if m is not None and hasattr(m, "CHUNK_MIN_TOKENS") and hasattr(m, "trimul_v4_forward")]
+    saved = (head.ROWS_MIN_TOKENS, K._MEMCHUNK["min_tokens"], [m.CHUNK_MIN_TOKENS for m in tms])
+    e = dict(emb, pair=emb["pair"].to("cuda"))
+    big = 1 << 30
+    def run(rows, triattn, trimul):
+        head.ROWS_MIN_TOKENS = 0 if rows else big
+        K._MEMCHUNK["min_tokens"] = 0 if triattn else big
+        for m in tms:
+            m.CHUNK_MIN_TOKENS = 0 if trimul else big
+        out = A.run_confidence(model, batch, e, xyz0)
+        return {k: v.float().cpu() for k, v in out.items() if torch.is_tensor(v)}
+    try:
+        ref = run(False, False, False)
+        print("[headcheck] ref mean_plddt=%.4f mean_pae=%.4f" % (float(ref["predicted_lddt"].mean()), float(ref["full_pae"].mean())), flush=True)
+        for name, flags in (("rerun_off", (False, False, False)), ("head_rows", (True, False, False)), ("triattn_chunk", (False, True, False)),
+                            ("trimul_chunk", (False, False, True)), ("all", (True, True, True))):
+            got = run(*flags)
+            print("[headcheck] %s %s" % (name, " ".join("%s=%.3g" % (k, float((got[k] - ref[k]).abs().max())) for k in sorted(ref))), flush=True)
+    finally:
+        head.ROWS_MIN_TOKENS, K._MEMCHUNK["min_tokens"] = saved[0], saved[1]
+        for m, v in zip(tms, saved[2]):
+            m.CHUNK_MIN_TOKENS = v
+        del e
+        torch.cuda.empty_cache()
+
+
 def _memdebug(torch, where, min_gib=0.5):
     """AF3T_MEMDEBUG=1: every live CUDA tensor of at least min_gib, with the types (and dict keys / frame names) of what refers to it, two levels up."""
     import gc
@@ -130,6 +162,8 @@ def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, p
         torch.cuda.synchronize(); torch.cuda.empty_cache()
         if item is not None:
             item["head_park"] = 1
+    if rpx is None and os.environ.get("AF3T_HEADCHECK"):
+        _headcheck(A, model, batch, emb, xyz[0], torch)
     t_conf = _clock(torch)                                                    # conf = the confidence head over every sample (A.run_confidence once per sample), summed; the distogram head after it is in no phase
     if rpx is None:
         confs = [A.run_confidence(model, batch, emb, xyz[s]) for s in range(int(xyz.shape[0]))]
