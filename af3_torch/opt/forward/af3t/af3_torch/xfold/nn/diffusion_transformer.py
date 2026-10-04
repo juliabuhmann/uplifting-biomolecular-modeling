@@ -22,6 +22,12 @@ from xfold import fastnn
 from xfold import of3
 
 
+
+import os
+# Row-blocked precompute_pair_logits from this many (padded) tokens (above the 4544 bucket: inputs up to 4500 tokens unchanged); env overrides for experiments.
+ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
+ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
+
 class AdaptiveLayerNorm(nn.Module):
     def __init__(self,
                  c_x: int,
@@ -288,8 +294,35 @@ class DiffusionTransformer(nn.Module):
     def precompute_pair_logits(self, pair_cond: torch.Tensor) -> torch.Tensor:
         """All blocks' pair logits [num_blocks, num_head, N, N]. They depend only on pair_cond, which is constant over
         the diffusion trajectory, so a sampler may compute them once per sample() call (HOIST lever; same arithmetic)."""
+        if pair_cond.shape[0] >= ROWS_MIN_TOKENS:
+            return self._precompute_pair_logits_rows(pair_cond)
         cache = {}
         return torch.stack([self.pair_logits_for_block(pair_cond, i, cache) for i in range(self.num_blocks)], dim=0)
+
+    def _precompute_pair_logits_rows(self, pair_cond: torch.Tensor) -> torch.Tensor:
+        """precompute_pair_logits for large inputs: the same LayerNorm + projections per block of query rows, written straight into ONE
+        [num_blocks, num_head, N, N] result -- no whole-pair LayerNorm activation, no per-superblock logits stacked into a second copy.
+        Same values up to the projection GEMM's leading size per block."""
+        n, H = pair_cond.shape[0], self.num_head
+        rows = max(64, min(n, int(ROWS_BLOCK_GIB * 2 ** 30 // (n * self.c_pair_cond * 4 * 2)) // 64 * 64))
+        out = None
+        for r0 in range(0, n, rows):
+            r1 = min(n, r0 + rows)
+            pc = pair_cond[r0:r1]
+            if self.per_block_pair_bias:
+                parts = [(i, i + 1, einops.rearrange(self.pair_logits_projection[i](self.pair_input_layer_norm[i](pc)), 'n s h -> h n s')[None])
+                         for i in range(self.num_blocks)]
+            else:
+                act = self.pair_input_layer_norm(pc)
+                parts = [(sb * self.super_block_size, (sb + 1) * self.super_block_size,
+                          einops.rearrange(self.pair_logits_projection[sb](act), 'n s (b h) -> b h n s', h=H)) for sb in range(self.num_super_blocks)]
+                del act
+            for b0, b1, blk in parts:
+                if out is None:
+                    out = torch.empty((self.num_blocks, H, n, n), dtype=blk.dtype, device=blk.device)
+                out[b0:b1, :, r0:r1] = blk
+            del parts
+        return out
 
     def forward(self,
                 act: torch.Tensor,

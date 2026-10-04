@@ -27,6 +27,12 @@ from xfold import fastnn
 
 
 @dataclasses.dataclass(frozen=True)
+
+import os
+# Row-blocked trunk-pair conditioning LayerNorm + projection from this many (padded) tokens (inputs up to 4500 tokens unchanged); env overrides for experiments.
+ROWS_MIN_TOKENS = int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608"))
+ROWS_BLOCK_GIB = float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))
+
 class AtomCrossAttEncoderOutput:
     token_act: torch.Tensor  # (num_tokens, ch)
     skip_connection: torch.Tensor  # (num_subsets, num_queries, ch)
@@ -239,8 +245,20 @@ class AtomCrossAttEncoder(nn.Module):
         pair_act = row_act[:, :, None, :] + col_act[:, None, :, :]
 
         if trunk_pair_cond is not None:
-            trunk_pair_cond = self.embed_trunk_pair_cond(
-                self.lnorm_trunk_pair_cond(trunk_pair_cond))
+            n_tok = trunk_pair_cond.shape[0]
+            if n_tok >= ROWS_MIN_TOKENS:                  # large inputs: LayerNorm + projection per block of rows into the [N, N, c] result (no whole fp32 LN output)
+                rows = max(64, min(n_tok, int(ROWS_BLOCK_GIB * 2 ** 30 // (n_tok * trunk_pair_cond.shape[-1] * 4 * 2)) // 64 * 64))
+                out = None
+                for r0 in range(0, n_tok, rows):
+                    blk = self.embed_trunk_pair_cond(self.lnorm_trunk_pair_cond(trunk_pair_cond[r0:r0 + rows]))
+                    if out is None:
+                        out = torch.empty((n_tok, n_tok, blk.shape[-1]), dtype=blk.dtype, device=blk.device)
+                    out[r0:r0 + rows] = blk
+                    del blk
+                trunk_pair_cond = out
+            else:
+                trunk_pair_cond = self.embed_trunk_pair_cond(
+                    self.lnorm_trunk_pair_cond(trunk_pair_cond))
             
             # Create the GatherInfo into a flattened trunk_pair_cond from the
             # queries and keys gather infos.
