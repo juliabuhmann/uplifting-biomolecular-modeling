@@ -54,8 +54,11 @@ _TRANS_PROV = {"mod": None, "cc": None, "stack": None, "refused": None, "sel": {
 _TRIATTN_EPI = {}                          # (c_out, H, D) -> the shared core's fpf_triatt_epi launch cell on this device (the core's pair-fused cell table, opt_core.attn.pair_fused
                                            # lookup_cell, resolved once: _apply_arch_cells); a key present = lever triattn's gate * o -> output projection -> block residual add run as
                                            # ONE kernel (fpf_triatt_epi.triatt_epilogue, block mode); absent = lnl_fused.gate_transpose + F.linear + the block's own add
+_MEMCHUNK = {"min_tokens": int(os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608")),   # memory-chunked pair statements (lever triattn: _triattn_chunked) from this many (padded)
+             "gib": float(os.environ.get("AF3T_MEMCHUNK_GIB", "4"))}                     #   tokens -- above the 4544 bucket, so inputs up to 4500 tokens run the whole-tensor path
+                                                                                         #   unchanged; "gib" = the transient budget per block. Env overrides are for experiments.
 _ORIG = {}
-_DEAD = {}                       # lever -> repr(exception) once a kernel error disabled it
+_DEAD = {}                     # lever -> repr(exception) once a kernel error disabled it
 # A kernel that raises disables its lever for the rest of the process and the stock path serves (_kernel_error); an OOM propagates first (is_oom).
 COUNTS = {k: {} for k in LEVERS}
 _PRINTED = set()
@@ -390,6 +393,60 @@ def _TRIATTN_STOCK_ROWS(TP):
     return set(getattr(TP, "STOCK_ROWS", ())) | set(getattr(TP, "NEEDS_STOCK", ()))
 
 
+def _memchunk_rows(N, bytes_per_row):
+    """Rows of the attention frame per block for the memory-chunked pair statements: the largest multiple of 64 whose transients fit _MEMCHUNK['gib']."""
+    r = int(_MEMCHUNK["gib"] * 2 ** 30 // max(1, bytes_per_row)) // 64 * 64
+    return max(64, min(N, r))
+
+
+def _triattn_chunked(self, pair, mask, residual, x, W, sel, TP, RFU, N, H, D, C):
+    """Lever triattn at N >= _MEMCHUNK['min_tokens']: the same statements as the whole-tensor path below, issued per block of rows of the attention
+    frame (rows of the pair for the starting node, columns for the ending node). The bias planes come from ONE ln_linear over the whole pair (as the
+    whole path: from untransposed LN(pair), before any block is updated); each block forms its own LN(pair) rows, q/k/v/g [R, N, 4C], attends with the
+    full bias and writes its update into its own rows / columns of the pair (attention rows are independent, and a block reads only its own rows, so the
+    in-place writes never feed a later block). Transients ~R*N*C*2*7 bytes instead of N*N*C*2*7 (y16, the 4C qkvg and o). Tolerance class vs the
+    whole path (the q/k/v/g GEMM runs at a different leading size per block)."""
+    _, b16 = RFU.ln_linear(x, W["lnw"], W["lnb"], W["Wb"], eps=W["eps"], write_y=False, transpose=False, planes=True)
+    bias5 = b16[:H][None, None]
+    if self.transpose and _column_bias_transposed():
+        bias5 = bias5.transpose(-1, -2)
+    mb = None if mask is None else (mask if mask.dtype == torch.bool else (mask != 0))
+    epi = _TRIATTN_EPI.get((C, H, D)) if residual and x.dtype == torch.bfloat16 else None
+    out = None if residual else torch.empty(x.shape, device=x.device, dtype=torch.bfloat16)
+    rows = _memchunk_rows(N, N * C * 2 * 7)
+    tr = bool(self.transpose)
+
+    def heads(t):
+        return t.unflatten(-1, (H, D)).permute(0, 2, 1, 3)[None]
+    for r0 in range(0, N, rows):
+        r1 = min(N, r0 + rows); R = r1 - r0
+        xb = x[:, r0:r1] if tr else x[r0:r1]                               # [N, R, C] (ending: the column block) | [R, N, C]
+        y16, _ = RFU.ln_linear(xb, W["lnw"], W["lnb"], W["Wb"], eps=W["eps"], write_y=True, transpose=tr, planes=True)   # [R, N, C]: the block's rows of the attention frame
+        qkvg = F.linear(y16, W["Wcat"]); del y16                            # [R, N, 4C] bf16
+        q5, k5, v5 = heads(qkvg[..., 0:C]), heads(qkvg[..., C:2 * C]), heads(qkvg[..., 2 * C:3 * C])
+        m5 = None
+        if mb is not None:
+            m5 = mb[r0:r1][None, :, None, None, :] if mb.dim() == 2 else mb[None, None, None, None, :].expand(1, R, 1, 1, N)
+        o = TP.triangle_attention(q5, k5, v5, bias5, m5, D ** -0.5, word=sel.word, selection=sel)      # [1, R, H, N, D]
+        if epi is not None:
+            from fpf_triatt_epi.epilogue import triatt_epilogue
+            triatt_epilogue(o, qkvg[None][..., 3 * C:], W["Wo16"], z=xb[None], ending=tr, residual=True, cfg=epi, woT16=W["WoT16"])   # xb += update, in place (strided z for the ending node)
+        else:
+            y = RFU.gate_transpose(o, qkvg[None], 3 * C, transpose=tr)[0]   # [N, R, C] (ending) | [R, N, C]: the untransposed frame
+            upd = F.linear(y, self.output_projection.weight); del y
+            if residual:
+                xb += upd
+            elif tr:
+                out[:, r0:r1] = upd
+            else:
+                out[r0:r1] = upd
+        del qkvg, o, q5, k5, v5
+    _count("triattn", "served:%s+chunk%d" % ("end" if tr else "start", rows))
+    if residual and epi is not None:
+        _count("attn_epi", "served:%s" % ("end" if tr else "start"))
+    return x if residual else out
+
+
 def _triattn_forward(self, pair, mask, residual=False):
     """residual=True (the kit's PairformerBlock statement, _residual_call): returns pair + update — with a tuned epilogue cell on this device the gate,
     output projection and the add run as ONE kernel writing the bf16 pair stream in place (fpf_triatt_epi block mode: sigmoid(g)*o rounded to bf16,
@@ -419,6 +476,8 @@ def _triattn_forward(self, pair, mask, residual=False):
         import lnl_fused as RFU
         W = _triattn_weights(self)
         x = pair if pair.is_contiguous() else pair.contiguous()
+        if N >= _MEMCHUNK["min_tokens"]:
+            return _triattn_chunked(self, pair, mask, residual, x, W, sel, TP, RFU, N, H, D, C)
         y16, b16 = RFU.ln_linear(x, W["lnw"], W["lnb"], W["Wb"], eps=W["eps"], write_y=True, transpose=bool(self.transpose), planes=True)   # head-plane-major [NOUT, N, N]
         bias5 = b16[:H][None, None]                                        # [1,1,H,N,N] (query i, key j) from untransposed LN(pair) -- as stock; head planes contiguous (the core's bias pass reads unit strides)
         if self.transpose and _column_bias_transposed():
