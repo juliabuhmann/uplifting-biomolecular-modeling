@@ -544,7 +544,7 @@ def cmd_pred(a) -> int:
               templates=f"{tc['live']}/{tc['declared']}",
               **dict(stack.n_gpu_fields(rep["n_gpu"])),                                   # the EXIT evidence of the resource axis: n_gpu=P sharding=rowpair|none (the core's words)
               wall_s=(chain_wall if rep["stream"]["engaged"] else round(sum(s["wall_s"] for s in steps), 1)), **({} if rc == EXIT_OK else {"work": work})))
-    if rc == EXIT_OK:                                                              # a clean pred leaves the stock layout only: the hand-off files, logs and step reports go
+    if rc == EXIT_OK and not os.environ.get("AF3T_KEEP_WORK"):                     # a clean pred leaves the stock layout only: the hand-off files, logs and step reports go (AF3T_KEEP_WORK=1: kept, for re-running the forward step alone)
         shutil.rmtree(work, ignore_errors=True)                                     # (a failed or partial one keeps them: the DONE line names the directory)
     return rc
 
