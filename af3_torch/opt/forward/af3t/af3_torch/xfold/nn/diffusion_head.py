@@ -28,6 +28,29 @@ SIGMA_DATA = 16.0
 
 
 import os
+_PARK = {"buf": None, "registered": False}
+
+
+def park_to_host(t: torch.Tensor) -> torch.Tensor:
+    """A host copy of the device tensor `t` (big's head_park) in ONE process-wide buffer of exactly the bytes needed (grown when a larger item
+    comes, reused by every later item: the previous item's parked pair is dead by then), page-locked with cudaHostRegister so the copies run
+    at pinned speed -- not torch's pinned caching allocator, which rounds each block up to a power of two (a 22 GiB park held 32 GiB of host
+    RAM) and keeps it cached. Falls back to pageable memory when registration is refused. Same bytes either way."""
+    nbytes = t.numel() * t.element_size()
+    buf = _PARK["buf"]
+    if buf is None or buf.numel() < nbytes:
+        if buf is not None and _PARK["registered"]:
+            torch.cuda.cudart().cudaHostUnregister(buf.data_ptr())
+        _PARK["buf"] = None
+        buf = torch.empty(nbytes, dtype=torch.uint8)
+        rc = torch.cuda.cudart().cudaHostRegister(buf.data_ptr(), nbytes, 0)
+        _PARK["registered"] = int(rc) == 0 if not hasattr(rc, "value") else int(rc.value) == 0
+        _PARK["buf"] = buf
+    host = buf[:nbytes].view(t.dtype).view(t.shape)
+    host.copy_(t)
+    return host
+
+
 MEM_MIN_TOKENS = int(os.environ.get("AF3T_PRIME_MIN_TOKENS", os.environ.get("AF3T_MEMCHUNK_MIN_TOKENS", "4608")))   # prime_static's no-clone statics / trunk-pair park from this many (padded) tokens
 
 class FourierEmbeddings(nn.Module):
@@ -368,11 +391,9 @@ class DiffusionHead(nn.Module):
         new = {}
         new["pair_cond"] = self._pair_conditioning(batch, embeddings, use_conditioning)
         if getattr(self, "park_trunk_pair", False) and int(new["pair_cond"].shape[0]) >= MEM_MIN_TOKENS and embeddings["pair"].is_cuda:
-            p = embeddings["pair"]                                   # big's head_park: past the conditioning nothing of the sampler reads the fp32 trunk pair (the step reads
-            host = torch.empty(p.shape, dtype=p.dtype, pin_memory=True)   # the statics) -- it goes to pinned host memory for the rest of the sampler and the heads (the
-            host.copy_(p)                                            # caller's dict is updated in place), before the per-block pair logits are laid
-            embeddings["pair"] = host
-            del p, host
+            embeddings["pair"] = park_to_host(embeddings["pair"])   # big's head_park: past the conditioning nothing of the sampler reads the fp32 trunk pair (the step reads the
+                                                                     # statics) -- it goes to host memory for the rest of the sampler and the heads (the caller's dict is
+                                                                     # updated in place), before the per-block pair logits are laid
         new["pair_logits"] = self.transformer.precompute_pair_logits(new["pair_cond"])
         if getattr(self, "fold_key_mask_into_pair_logits", False):   # the fused token transformer's attention row reads the key mask from the bias (forward.swap_in_dtk sets
             km = batch.token_features.mask                           # this): the masked keys' logits := -1e9 here, once per trajectory -- every consumer of the hoisted logits

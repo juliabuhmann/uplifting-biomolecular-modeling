@@ -156,9 +156,8 @@ def _forward_samples(A, model, batch, seed, torch, diff_free=False, item=None, p
     if parked:
         model.diffusion_head.park_trunk_pair = False
         if emb["pair"].is_cuda:                                               # not parked by the priming (no hoist): park it now, before the heads
-            host = torch.empty(emb["pair"].shape, dtype=emb["pair"].dtype, pin_memory=True)
-            host.copy_(emb["pair"])
-            emb = dict(emb, pair=host); del host
+            from xfold.nn.diffusion_head import park_to_host
+            emb = dict(emb, pair=park_to_host(emb["pair"]))
         torch.cuda.synchronize(); torch.cuda.empty_cache()
         if item is not None:
             item["head_park"] = 1
