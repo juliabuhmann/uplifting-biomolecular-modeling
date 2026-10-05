@@ -229,8 +229,16 @@ class Evoformer(nn.Module):
             batch.token_features, target_feat
         )
 
-        pair_activations += self.prev_embedding(
-            self.prev_embedding_layer_norm(prev['pair']))
+        n = int(pair_activations.shape[0])
+        if n >= REL_ROWS_MIN_TOKENS:                 # large inputs: the recycled pair's LayerNorm + projection per block of rows into the pair (no whole-pair
+            prev_pair = prev['pair']                 # LN output / projection output beside the fp32 prev and the new pair); prev read once, as before
+            rows = max(64, min(n, int(REL_ROWS_BLOCK_GIB * 2 ** 30 // (n * prev_pair.shape[-1] * 4 * 2)) // 64 * 64))
+            for r0 in range(0, n, rows):
+                pair_activations[r0:r0 + rows] += self.prev_embedding(self.prev_embedding_layer_norm(prev_pair[r0:r0 + rows]))
+            del prev_pair
+        else:
+            pair_activations += self.prev_embedding(
+                self.prev_embedding_layer_norm(prev['pair']))
 
         pair_activations = self._relative_encoding(batch, pair_activations)
 
